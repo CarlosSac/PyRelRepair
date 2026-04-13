@@ -1,0 +1,37 @@
+.venv
+__pycache__/
+
+# Python
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.env.*
+
+# Data & results (large/generated files)
+data/condefects/
+results/
+
+# HuggingFace model cache
+.cache/
+*.bin
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp files
+temp.py
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
