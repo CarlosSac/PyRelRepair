@@ -1,6 +1,6 @@
-# PyRelRepair — Stage 1: Core Infrastructure & Base Repair
+# PyRelRepair: Base Repair
 
-A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented approach to automated program repair. At this stage the project has the foundational infrastructure and implements the first repair strategy: **BaseRepair**.
+A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented approach to automated program repair. At this stage the project has the foundational infrastructure and implements the first repair strategy: **BaseRepair**, evaluated on the **ConDefects** Python benchmark.
 
 ## Requirements
 
@@ -11,7 +11,66 @@ A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented a
 pip install requests numpy pytest
 ```
 
-## Usage example for BaseRepair
+### Recommended model
+
+`qwen2.5-coder:32b` — requires ~20 GB VRAM.
+
+```bash
+ollama pull qwen2.5-coder:32b
+```
+
+## Setup
+
+```bash
+pyenv local 3.12
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## ConDefects dataset
+
+Clone the dataset into `data/condefects`:
+
+```bash
+git clone https://github.com/appmlk/ConDefects data/condefects
+```
+
+For full stdin/stdout validation, download `Test.zip` from the [ConDefects OneDrive link](https://github.com/appmlk/ConDefects?tab=readme-ov-file#test-cases-download), place it in `data/condefects/`, and extract it:
+
+```bash
+cd data/condefects && unzip Test.zip
+```
+
+Without `Test/`, the runner falls back to syntax-only validation.
+
+## Running BaseRepair on ConDefects
+
+```bash
+python scripts/run_baserepair.py --n 50
+```
+
+Options:
+
+| Flag     | Default           | Description                  |
+| -------- | ----------------- | ---------------------------- |
+| `--n`    | 10                | Number of bugs to evaluate   |
+| `--data` | `data/condefects` | Path to ConDefects repo root |
+
+### Output
+
+```
+=== BaseRepair Results ===
+Model          : qwen2.5-coder:32b
+Bugs evaluated : 50
+Syntax valid   : 50/50 (100.0%)
+Bugs with tests: 50/50
+All tests pass : X/50 (Y%)
+```
+
+Validation uses stdin/stdout comparison against the AtCoder test cases. A patch is considered correct only if it passes **all** test cases for that problem.
+
+## Usage example for BaseRepair (programmatic)
 
 ```python
 from pathlib import Path
@@ -39,8 +98,20 @@ for c in candidates:
 
 Without `project_dir` and `test_file`, patches are syntax-checked only (no pytest).
 
+## Configuration
+
+Key settings in `pyrelrepair/config.py`:
+
+| Field              | Default                  | Description               |
+| ------------------ | ------------------------ | ------------------------- |
+| `ollama_model`     | `qwen2.5-coder:32b`      | Ollama model name         |
+| `ollama_base_url`  | `http://localhost:11434` | Ollama server URL         |
+| `temperature`      | `1.0`                    | Sampling temperature      |
+| `llm_timeout`      | `300`                    | Seconds per LLM request   |
+| `base_num_patches` | `1`                      | Patches generated per bug |
+
 ## Upcoming Stages
 
-- **SigRepair** (Stage 2): query rewriting + SentenceBERT retrieval over function signatures
-- **SnipRepair** (Stage 3): CodeBERT retrieval over code snippets with adaptive weight tuning
+- **SigRepair:** query rewriting + SentenceBERT retrieval over function signatures
+- **SnipRepair:**: CodeBERT retrieval over code snippets with adaptive weight tuning
 - **Pipeline**: sequential orchestrator with early exit on first passing patch
