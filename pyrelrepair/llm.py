@@ -58,7 +58,7 @@ class OllamaClient:
                 resp = requests.post(
                     f"{self.base_url}/api/generate",
                     json=payload,
-                    timeout=120,
+                    timeout=self.config.llm_timeout,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -97,7 +97,7 @@ class OllamaClient:
             resp = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=120,
+                timeout=self.config.llm_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
