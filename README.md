@@ -1,6 +1,6 @@
 # PyRelRepair: Base Repair
 
-A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented approach to automated program repair. At this stage the project has the foundational infrastructure and implements the first repair strategy: **BaseRepair**, evaluated on the **ConDefects** Python benchmark.
+A Python adaptation of **[RelRepair](https://arxiv.org/abs/2509.16701)**, a retrieval-augmented approach to automated program repair. At this stage the project has the foundational infrastructure and implements the first repair strategy: **BaseRepair**, evaluated on the **ConDefects** Python benchmark.
 
 ## Requirements
 
@@ -49,10 +49,11 @@ python scripts/run_baserepair.py --n 50
 
 Options:
 
-| Flag     | Default           | Description                  |
-| -------- | ----------------- | ---------------------------- |
-| `--n`    | 10                | Number of bugs to evaluate   |
-| `--data` | `data/condefects` | Path to ConDefects repo root |
+| Flag          | Default           | Description                                    |
+| ------------- | ----------------- | ---------------------------------------------- |
+| `--n`         | 10                | Number of bugs to evaluate                     |
+| `--data`      | `data/condefects` | Path to ConDefects repo root                   |
+| `--verbose`, `-v` | off           | Log prompts, responses, token counts, per-test results |
 
 ### Output
 
@@ -61,39 +62,14 @@ Options:
 Model          : qwen2.5-coder:32b
 Bugs evaluated : 50
 Syntax valid   : 50/50 (100.0%)
+Tokens (prompt): 125,000
+Tokens (output):  32,500
+Tokens (total) : 157,500
 Bugs with tests: 50/50
 All tests pass : X/50 (Y%)
 ```
 
 Validation uses stdin/stdout comparison against the AtCoder test cases. A patch is considered correct only if it passes **all** test cases for that problem.
-
-## Usage example for BaseRepair (programmatic)
-
-```python
-from pathlib import Path
-from pyrelrepair.config import Config
-from pyrelrepair.base_repair import BugInfo, base_repair
-
-bug = BugInfo(
-    bug_id="example_001",
-    file_path=Path("src/module.py"),
-    function_name="compute_total",
-    buggy_function="def compute_total(items):\n    return sum(items) - 1",
-    fault_line=2,
-    start_line=1,
-    end_line=2,
-    error_message="AssertionError: expected 42, got 41",
-    test_output="FAILED tests/test_module.py::test_compute_total",
-    project_dir=Path("."),
-    test_file=Path("tests/test_module.py"),
-)
-
-candidates = base_repair(bug, Config())
-for c in candidates:
-    print(c.is_valid, c.patch_code)
-```
-
-Without `project_dir` and `test_file`, patches are syntax-checked only (no pytest).
 
 ## Configuration
 
@@ -107,8 +83,49 @@ Key settings in `pyrelrepair/config.py`:
 | `llm_timeout`      | `300`                    | Seconds per LLM request   |
 | `base_num_patches` | `1`                      | Patches generated per bug |
 
+## Programmatic usage (Python API)
+
+For embedding BaseRepair in your own code rather than using the CLI.
+
+```python
+from pathlib import Path
+from pyrelrepair.config import Config
+from pyrelrepair.base_repair import BugInfo, base_repair
+
+bug = BugInfo(
+    bug_id="example_001",
+    file_path=Path("src/module.py"),
+    function_name="compute_total",
+    buggy_function="def compute_total(items):\n    return sum(items) - 1",
+    fault_line=2,    # 1-based line of the fault within the function
+    start_line=1,    # function's first line in the file
+    end_line=2,      # function's last line in the file
+    error_message="AssertionError: expected 42, got 41",
+    test_output="FAILED tests/test_module.py::test_compute_total",
+    project_dir=Path("."),                   # omit for syntax-only validation
+    test_file=Path("tests/test_module.py"),  # omit to run all project tests
+)
+
+candidates = base_repair(bug, Config())
+for c in candidates:
+    print(c.patch_code)   # only syntax-valid patches are returned
+```
+
+With `project_dir` set, use `c.is_valid` to check whether the patch passed the test suite:
+
+```python
+candidates = base_repair(bug, Config())
+for c in candidates:
+    if c.is_valid:        # True only when all tests pass
+        print(c.patch_code)
+```
+
 ## Upcoming Stages
 
 - **SigRepair:** query rewriting + SentenceBERT retrieval over function signatures
 - **SnipRepair:**: CodeBERT retrieval over code snippets with adaptive weight tuning
 - **Pipeline**: sequential orchestrator with early exit on first passing patch
+
+## References
+
+- Liu, et al. (2025). RelRepair. arXiv:2509.16701. https://arxiv.org/abs/2509.16701
