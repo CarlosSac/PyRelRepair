@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pyrelrepair.config import Config
 from pyrelrepair.condefects_loader import ConDefectsBug, load_bugs
 from pyrelrepair.llm import OllamaClient
+from pyrelrepair.prompt_utils import code_with_linenos, fault_context
 from pyrelrepair.prompts import SCRIPT_REPAIR_PROMPT
 from pyrelrepair.validator import validate_syntax
 
@@ -34,29 +35,6 @@ def _set_verbose() -> None:
     logging.getLogger().setLevel(logging.DEBUG)
     logging.getLogger("urllib3").setLevel(logging.WARNING)  # silence HTTP noise
 
-
-def _code_with_linenos(code: str) -> str:
-    """Return code with left-padded line numbers: '  1 | line'."""
-    lines = code.splitlines()
-    width = len(str(len(lines)))
-    return "\n".join(f"{i + 1:{width}d} | {line}" for i, line in enumerate(lines))
-
-
-def _fault_context(code: str, fault_line: int, radius: int = 4) -> tuple[str, str]:
-    """Return (fault_line_content, context_block) for the given 1-based fault line.
-
-    Context block shows `radius` lines before/after with an arrow on the fault line.
-    """
-    lines = code.splitlines()
-    fault_content = lines[fault_line - 1].strip() if 0 < fault_line <= len(lines) else ""
-    start = max(0, fault_line - 1 - radius)
-    end = min(len(lines), fault_line + radius)
-    width = len(str(end))
-    context_lines = []
-    for i in range(start, end):
-        marker = ">>>" if i == fault_line - 1 else "   "
-        context_lines.append(f"{marker} {i + 1:{width}d} | {lines[i]}")
-    return fault_content, "\n".join(context_lines)
 
 
 def extract_script(response: str) -> str | None:
@@ -193,11 +171,11 @@ def main():
             i, len(bugs), bug.task_id, bug.submission_id, bug.fault_line,
         )
 
-        fault_line_content, fault_ctx = _fault_context(bug.buggy_code, bug.fault_line)
+        fault_line_content, fault_ctx = fault_context(bug.buggy_code, bug.fault_line)
         prompt = SCRIPT_REPAIR_PROMPT.format(
             task_id=bug.task_id,
             fault_line=bug.fault_line,
-            buggy_code_with_linenos=_code_with_linenos(bug.buggy_code),
+            buggy_code_with_linenos=code_with_linenos(bug.buggy_code),
             fault_line_content=fault_line_content,
             fault_context=fault_ctx,
         )
