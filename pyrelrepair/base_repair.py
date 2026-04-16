@@ -1,8 +1,8 @@
 """BaseRepair: Stage 1 of the PyRelRepair pipeline.
 
 Generates a single candidate patch using only the buggy function,
-error messages, and failing test output — no retrieval augmentation.
-This serves as both the first repair attempt and the no-retrieval baseline.
+error messages, and failing test output.
+This is the first repair attempt and the no-retrieval baseline.
 """
 from __future__ import annotations
 
