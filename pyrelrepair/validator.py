@@ -37,7 +37,6 @@ def extract_function_from_response(response: str) -> str | None:
         return match.group(1).strip()
 
     # Fallback: try to find a def statement.
-    # Use [^\n]* instead of .* to prevent overlapping quantifiers causing ReDoS.
     pattern = r"((?:@\w+[^\n]*\n)*def\s+\w+\s*\([^\n]*(?:\n[ \t][^\n]*)*)"
     match = re.search(pattern, response, re.MULTILINE)
     if match:
