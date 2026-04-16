@@ -8,19 +8,28 @@ Adapted from the RelRepair paper for Python programs.
 BASE_SYSTEM = "You are an expert in Python program repair."
 
 BASE_REPAIR_PROMPT = """\
-You are an expert in Python program repair.
+You are an expert in Python program repair. \
+The following function contains exactly one bug.
 
-## Buggy Function
-The following function contains a bug at the indicated location.
-
-File: {file_path}
-Fault location: line {fault_line}
+## Function: {function_name} (in {file_path})
 
 ```python
-{buggy_function}
+{buggy_function_with_linenos}
 ```
 
-## Error Message
+## Fault Location
+The bug is on **line {fault_line_relative}** of the function:
+
+```python
+{fault_line_content}
+```
+
+Surrounding context:
+```
+{fault_context}
+```
+
+## Error
 {error_message}
 
 ## Failing Test Output
@@ -29,7 +38,7 @@ Fault location: line {fault_line}
 ```
 
 ## Task
-Fix the bug in the function above. Return ONLY the complete corrected function, \
+Fix the bug. Return ONLY the complete corrected function \
 enclosed in a single ```python code block. Do not include any explanation.
 """
 
