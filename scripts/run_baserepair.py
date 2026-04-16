@@ -30,6 +30,35 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def _set_verbose() -> None:
+    logging.getLogger().setLevel(logging.DEBUG)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)  # silence HTTP noise
+
+
+def _code_with_linenos(code: str) -> str:
+    """Return code with left-padded line numbers: '  1 | line'."""
+    lines = code.splitlines()
+    width = len(str(len(lines)))
+    return "\n".join(f"{i + 1:{width}d} | {line}" for i, line in enumerate(lines))
+
+
+def _fault_context(code: str, fault_line: int, radius: int = 4) -> tuple[str, str]:
+    """Return (fault_line_content, context_block) for the given 1-based fault line.
+
+    Context block shows `radius` lines before/after with an arrow on the fault line.
+    """
+    lines = code.splitlines()
+    fault_content = lines[fault_line - 1].strip() if 0 < fault_line <= len(lines) else ""
+    start = max(0, fault_line - 1 - radius)
+    end = min(len(lines), fault_line + radius)
+    width = len(str(end))
+    context_lines = []
+    for i in range(start, end):
+        marker = ">>>" if i == fault_line - 1 else "   "
+        context_lines.append(f"{marker} {i + 1:{width}d} | {lines[i]}")
+    return fault_content, "\n".join(context_lines)
+
+
 def extract_script(response: str) -> str | None:
     """Extract a Python script from an LLM response (```python ... ```)."""
     match = re.search(r"```python\s*\n(.*?)```", response, re.DOTALL)
@@ -79,7 +108,7 @@ def run_on_tests(code: str, test_in_dir: Path, timeout: int = 10) -> tuple[int, 
     passed = 0
     total = 0
 
-    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", encoding="utf-8", delete=False) as tmp:
         tmp.write(code)
         tmp_path = Path(tmp.name)
 
@@ -103,10 +132,15 @@ def run_on_tests(code: str, test_in_dir: Path, timeout: int = 10) -> tuple[int, 
                 ).rstrip("\n")
                 if actual == expected:
                     passed += 1
+                    logger.debug("    [PASS] %s", in_file.name)
+                else:
+                    logger.debug("    [FAIL] %s", in_file.name)
+                    logger.debug("      expected: %s", expected[:120])
+                    logger.debug("      actual  : %s", actual[:120])
             except subprocess.TimeoutExpired:
-                pass
-            except Exception:
-                pass
+                logger.debug("    [TIMEOUT] %s", in_file.name)
+            except Exception as exc:
+                logger.debug("    [ERROR] %s — %s", in_file.name, exc)
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -122,7 +156,15 @@ def main():
         default=Path("data/condefects"),
         help="Path to ConDefects repo root",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show prompts, raw LLM responses, token counts, and per-test results",
+    )
     args = parser.parse_args()
+
+    if args.verbose:
+        _set_verbose()
 
     config = Config()
     client = OllamaClient(config)
@@ -142,6 +184,8 @@ def main():
     logger.info("Loaded %d bugs. Model: %s", len(bugs), config.ollama_model)
 
     results = []
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
     for i, bug in enumerate(bugs, 1):
         logger.info(
@@ -149,15 +193,29 @@ def main():
             i, len(bugs), bug.task_id, bug.submission_id, bug.fault_line,
         )
 
+        fault_line_content, fault_ctx = _fault_context(bug.buggy_code, bug.fault_line)
         prompt = SCRIPT_REPAIR_PROMPT.format(
             task_id=bug.task_id,
             fault_line=bug.fault_line,
-            buggy_code=bug.buggy_code,
+            buggy_code_with_linenos=_code_with_linenos(bug.buggy_code),
+            fault_line_content=fault_line_content,
+            fault_context=fault_ctx,
         )
+
+        logger.debug("--- PROMPT ---\n%s\n--------------", prompt)
 
         responses = client.generate(prompt, num_return=1)
         response_text = responses[0].text if responses else ""
+
+        if responses:
+            r = responses[0]
+            total_prompt_tokens += r.prompt_tokens
+            total_completion_tokens += r.completion_tokens
+            logger.debug("--- RAW RESPONSE (tokens: prompt=%d completion=%d) ---\n%s\n---",
+                         r.prompt_tokens, r.completion_tokens, response_text)
+
         patched = extract_script(response_text)
+        logger.debug("--- EXTRACTED PATCH ---\n%s\n---", patched if patched else "(none)")
 
         syntax_ok = validate_syntax(patched) if patched else False
 
@@ -195,6 +253,9 @@ def main():
     print(f"Model          : {config.ollama_model}")
     print(f"Bugs evaluated : {total}")
     print(f"Syntax valid   : {n_syntax}/{total} ({100*n_syntax/total:.1f}%)")
+    print(f"Tokens (prompt): {total_prompt_tokens:,}")
+    print(f"Tokens (output): {total_completion_tokens:,}")
+    print(f"Tokens (total) : {total_prompt_tokens + total_completion_tokens:,}")
 
     if has_tests:
         n_all_pass = sum(r["all_tests_passed"] for r in results)
