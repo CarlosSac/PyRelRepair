@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import Config
 from .llm import OllamaClient
 from .prompts import BASE_REPAIR_PROMPT
+from .prompt_utils import code_with_linenos, fault_context
 from .validator import (
     ValidationResult,
     apply_patch,
@@ -64,10 +65,15 @@ def base_repair(bug: BugInfo, config: Config) -> list[PatchCandidate]:
     llm = OllamaClient(config)
     candidates = []
 
+    fault_line_relative = bug.fault_line - bug.start_line + 1
+    fault_content, fault_ctx = fault_context(bug.buggy_function, fault_line_relative)
     prompt = BASE_REPAIR_PROMPT.format(
         file_path=bug.file_path,
-        fault_line=bug.fault_line,
-        buggy_function=bug.buggy_function,
+        function_name=bug.function_name,
+        buggy_function_with_linenos=code_with_linenos(bug.buggy_function),
+        fault_line_relative=fault_line_relative,
+        fault_line_content=fault_content,
+        fault_context=fault_ctx,
         error_message=bug.error_message,
         test_output=bug.test_output,
     )
