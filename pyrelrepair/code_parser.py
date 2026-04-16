@@ -16,7 +16,7 @@ class FunctionInfo:
     docstring: str
     body: str  # full function source
     code: str  # body without comments/docstrings
-    comments: str  # inline + block comments extracted from body
+    comments: str  # inline and block comments extracted from body
     file_path: Path
     start_line: int
     end_line: int
@@ -39,8 +39,8 @@ class FunctionInfo:
 
 def _get_source_segment(source_lines: list[str], node: ast.AST) -> str:
     """Extract the source text for an AST node."""
-    start = node.lineno - 1
-    end = node.end_lineno
+    start = getattr(node, "lineno", 1) - 1
+    end = getattr(node, "end_lineno", getattr(node, "lineno", 1))
     lines = source_lines[start:end]
     if lines:
         lines = textwrap.dedent("\n".join(lines)).strip().split("\n")
