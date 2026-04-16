@@ -11,9 +11,11 @@ A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented a
 pip install requests numpy pytest
 ```
 
-### Recommended model
+### Default model
 
-`qwen2.5-coder:32b` — requires ~20 GB VRAM.
+`qwen2.5-coder:32b`
+
+The model can be updated in `pyrelrepair/config.py` by changing the `ollama_model` field
 
 ```bash
 ollama pull qwen2.5-coder:32b
@@ -22,7 +24,6 @@ ollama pull qwen2.5-coder:32b
 ## Setup
 
 ```bash
-pyenv local 3.12
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
