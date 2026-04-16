@@ -35,19 +35,28 @@ enclosed in a single ```python code block. Do not include any explanation.
 
 # ConDefects script-level repair
 SCRIPT_REPAIR_PROMPT = """\
-You are an expert in Python program repair.
+You are an expert in Python competitive programming. \
+The following solution received a Wrong Answer verdict. It contains exactly one bug.
 
-## Buggy Program
-The following Python script contains a bug at the indicated line.
-
-File: {task_id}
-Fault location: line {fault_line}
+## Program: {task_id}
 
 ```python
-{buggy_code}
+{buggy_code_with_linenos}
+```
+
+## Fault Location
+The bug is on **line {fault_line}**:
+
+```python
+{fault_line_content}
+```
+
+Surrounding context:
+```
+{fault_context}
 ```
 
 ## Task
-Fix the bug in the script above. Return ONLY the complete corrected script, \
+Fix the bug. Return ONLY the complete corrected script \
 enclosed in a single ```python code block. Do not include any explanation.
 """
