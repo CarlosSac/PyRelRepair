@@ -4,12 +4,8 @@ A Python adaptation of **RelRepair** (Liu et al., 2025), a retrieval-augmented a
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.10+
 - [Ollama](https://ollama.ai/) running locally with a code model pulled
-
-```bash
-pip install requests numpy pytest
-```
 
 ### Default model
 
