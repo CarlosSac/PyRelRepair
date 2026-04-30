@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .config import Config
 from .llm import OllamaClient
@@ -23,6 +24,8 @@ from .validator import (
 )
 
 logger = logging.getLogger(__name__)
+
+ValidatorFn = Callable[["PatchCandidate"], "ValidationResult | None"]
 
 
 @dataclass
@@ -79,7 +82,11 @@ class PatchCandidate:
         return self.validation is not None and self.validation.passed
 
 
-def base_repair(bug: BugInfo, config: Config) -> list[PatchCandidate]:
+def base_repair(
+    bug: BugInfo,
+    config: Config,
+    validator: ValidatorFn | None = None,
+) -> list[PatchCandidate]:
     """Execute the BaseRepair stage.
 
     Generates config.base_num_patches candidate patches (default: 1)
@@ -149,11 +156,22 @@ def base_repair(bug: BugInfo, config: Config) -> list[PatchCandidate]:
 
             if result.passed:
                 logger.info("BaseRepair: patch %d PASSED all tests!", i)
+                candidates.append(candidate)
+                return candidates  # early stop on success
             else:
                 logger.info(
                     "BaseRepair: patch %d failed (%d passed, %d failed, %d errors)",
                     i, result.num_passed, result.num_failed, result.num_errors,
                 )
+
+        elif validator is not None:
+            result = validator(candidate)
+            if result is not None:
+                candidate.validation = result
+                if result.passed:
+                    logger.info("BaseRepair: patch %d PASSED (external validator)!", i)
+                    candidates.append(candidate)
+                    return candidates  # early stop on success
 
         candidates.append(candidate)
 

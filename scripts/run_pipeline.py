@@ -14,12 +14,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pyrelrepair.base_repair import BugInfo
+from pyrelrepair.base_repair import BugInfo, PatchCandidate
 from pyrelrepair.code_parser import extract_functions
 from pyrelrepair.config import Config
 from pyrelrepair.condefects_loader import ConDefectsBug, load_bugs
 from pyrelrepair.llm import OllamaClient
 from pyrelrepair.pipeline import PipelineResult, run_pipeline
+from pyrelrepair.validator import ValidationResult
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -95,6 +96,22 @@ def run_on_tests(code: str, test_in_dir: Path, timeout: int = 10) -> tuple[int, 
     return passed, total
 
 
+def make_validator(raw_bug: ConDefectsBug, bug: BugInfo, test_in: Path):
+    def validate(candidate: PatchCandidate) -> ValidationResult | None:
+        original = raw_bug.buggy_file.read_text(encoding="utf-8")
+        patched = patch_script(original, candidate.patch_code, bug.start_line, bug.end_line)
+        passed, total = run_on_tests(patched, test_in)
+        return ValidationResult(
+            passed=passed == total and total > 0,
+            output=f"{passed}/{total} tests passed",
+            return_code=0 if passed == total else 1,
+            num_passed=passed,
+            num_failed=total - passed,
+            num_errors=0,
+        )
+    return validate
+
+
 def patch_script(original: str, patch_code: str, start_line: int, end_line: int) -> str:
     lines = original.splitlines()
     return "\n".join(
@@ -136,7 +153,9 @@ def main() -> None:
 
         logger.info("[%d/%d] %s — function: %s", len(results) + 1, args.n, bug.bug_id, bug.function_name)
 
-        pipeline_result: PipelineResult = run_pipeline(bug, config)
+        test_in = get_test_dir(raw_bug, args.data) if has_tests else None
+        validator = make_validator(raw_bug, bug, test_in) if test_in else None
+        pipeline_result: PipelineResult = run_pipeline(bug, config, validator=validator)
 
         row = {
             "bug_id": bug.bug_id,
@@ -149,20 +168,22 @@ def main() -> None:
         }
 
         best = pipeline_result.best_candidate
-        if best and has_tests:
-            test_in = get_test_dir(raw_bug, args.data)
-            if test_in:
+        if best and test_in:
+            # Reuse validation already done by the in-pipeline validator if available,
+            # otherwise run tests now (e.g. for BaseRepair candidates).
+            if best.validation is not None:
+                passed = best.validation.num_passed
+                total = best.validation.num_passed + best.validation.num_failed
+            else:
                 original = raw_bug.buggy_file.read_text(encoding="utf-8")
                 patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
                 passed, total = run_on_tests(patched, test_in)
-                row["tests_passed"] = passed
-                row["tests_total"] = total
-                row["all_tests_passed"] = passed == total and total > 0
-                row["best_stage"] = best.stage
-                logger.info("  base=%d  sig=%d  tests=%d/%d  stage=%s",
-                    row["base_candidates"], row["sig_candidates"], passed, total, best.stage)
-            else:
-                logger.info("  base=%d  sig=%d  no test dir", row["base_candidates"], row["sig_candidates"])
+            row["tests_passed"] = passed
+            row["tests_total"] = total
+            row["all_tests_passed"] = passed == total and total > 0
+            row["best_stage"] = best.stage
+            logger.info("  base=%d  sig=%d  tests=%d/%d  stage=%s",
+                row["base_candidates"], row["sig_candidates"], passed, total, best.stage)
         else:
             logger.info("  base=%d  sig=%d", row["base_candidates"], row["sig_candidates"])
 

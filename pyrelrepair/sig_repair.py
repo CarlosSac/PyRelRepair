@@ -15,7 +15,7 @@ import logging
 import re
 from pathlib import Path
 
-from .base_repair import BugInfo, PatchCandidate
+from .base_repair import BugInfo, PatchCandidate, ValidatorFn
 from .code_parser import (
     FunctionInfo,
     extract_functions_from_directory,
@@ -124,7 +124,11 @@ def _query_rewrite(llm: OllamaClient, bug: BugInfo) -> str:
     return query
 
 
-def sig_repair(bug: BugInfo, config: Config) -> list[PatchCandidate]:
+def sig_repair(
+    bug: BugInfo,
+    config: Config,
+    validator: ValidatorFn | None = None,
+) -> list[PatchCandidate]:
     """Execute the SigRepair stage.
 
     Runs config.sig_num_iterations iterations (default: 20), each time:
@@ -220,6 +224,15 @@ def sig_repair(bug: BugInfo, config: Config) -> list[PatchCandidate]:
                 logger.info("SigRepair iter %d: patch PASSED all tests!", i + 1)
                 candidates.append(candidate)
                 return candidates  # early stop on success
+
+        elif validator is not None:
+            result = validator(candidate)
+            if result is not None:
+                candidate.validation = result
+                if result.passed:
+                    logger.info("SigRepair iter %d: patch PASSED (external validator)!", i + 1)
+                    candidates.append(candidate)
+                    return candidates  # early stop on success
 
         candidates.append(candidate)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from .base_repair import BugInfo, PatchCandidate, base_repair
+from .base_repair import BugInfo, PatchCandidate, ValidatorFn, base_repair
 from .config import Config
 from .sig_repair import sig_repair
 
@@ -40,13 +40,17 @@ class PipelineResult:
         return self.all_candidates[-1] if self.all_candidates else None
 
 
-def run_pipeline(bug: BugInfo, config: Config) -> PipelineResult:
+def run_pipeline(
+    bug: BugInfo,
+    config: Config,
+    validator: ValidatorFn | None = None,
+) -> PipelineResult:
     """Run BaseRepair then SigRepair, stopping early on a passing patch."""
     result = PipelineResult(bug_id=bug.bug_id)
 
     # Stage 1: BaseRepair
     logger.info("Pipeline [%s]: running BaseRepair", bug.bug_id)
-    result.base_candidates = base_repair(bug, config)
+    result.base_candidates = base_repair(bug, config, validator=validator)
 
     if any(c.is_valid for c in result.base_candidates):
         result.passing_stage = "BaseRepair"
@@ -55,7 +59,7 @@ def run_pipeline(bug: BugInfo, config: Config) -> PipelineResult:
 
     # Stage 2: SigRepair
     logger.info("Pipeline [%s]: BaseRepair failed, escalating to SigRepair", bug.bug_id)
-    result.sig_candidates = sig_repair(bug, config)
+    result.sig_candidates = sig_repair(bug, config, validator=validator)
 
     if any(c.is_valid for c in result.sig_candidates):
         result.passing_stage = "SigRepair"

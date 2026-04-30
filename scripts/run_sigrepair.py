@@ -18,12 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pyrelrepair.base_repair import BugInfo
+from pyrelrepair.base_repair import BugInfo, PatchCandidate
 from pyrelrepair.code_parser import extract_functions
 from pyrelrepair.config import Config
 from pyrelrepair.condefects_loader import ConDefectsBug, load_bugs
 from pyrelrepair.llm import OllamaClient
 from pyrelrepair.sig_repair import sig_repair
+from pyrelrepair.validator import ValidationResult
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,6 +66,25 @@ def condefects_to_buginfo(bug: ConDefectsBug) -> BugInfo | None:
         test_output="",
         project_dir=None,                  # no pytest suite; skips in-stage validation
     )
+
+
+def make_validator(raw_bug: ConDefectsBug, bug: BugInfo, test_in: Path):
+    def validate(candidate: PatchCandidate) -> ValidationResult | None:
+        original = raw_bug.buggy_file.read_text(encoding="utf-8")
+        lines = original.splitlines()
+        patched = "\n".join(
+            lines[: bug.start_line - 1] + candidate.patch_code.splitlines() + lines[bug.end_line :]
+        )
+        passed, total = run_on_tests(patched, test_in)
+        return ValidationResult(
+            passed=passed == total and total > 0,
+            output=f"{passed}/{total} tests passed",
+            return_code=0 if passed == total else 1,
+            num_passed=passed,
+            num_failed=total - passed,
+            num_errors=0,
+        )
+    return validate
 
 
 def get_test_dir(bug: ConDefectsBug, condefects_dir: Path) -> Path | None:
@@ -145,7 +165,9 @@ def main() -> None:
             len(results) + 1, args.n, bug.bug_id, bug.fault_line, bug.function_name,
         )
 
-        candidates = sig_repair(bug, config)
+        test_in = get_test_dir(raw_bug, args.data) if has_tests else None
+        validator = make_validator(raw_bug, bug, test_in) if test_in else None
+        candidates = sig_repair(bug, config, validator=validator)
 
         best = None
         if candidates:
@@ -155,26 +177,20 @@ def main() -> None:
         tests_passed = tests_total = None
         all_pass = False
 
-        if best and has_tests:
-            test_in = get_test_dir(raw_bug, args.data)
-            if test_in:
-                # Rebuild the full patched script for stdin/stdout testing
+        if best and test_in:
+            # Reuse validation already done in-pipeline if available.
+            if best.validation is not None:
+                tests_passed = best.validation.num_passed
+                tests_total = best.validation.num_passed + best.validation.num_failed
+            else:
                 original = raw_bug.buggy_file.read_text(encoding="utf-8")
                 lines = original.splitlines()
-                patched_lines = (
-                    lines[: bug.start_line - 1]
-                    + best.patch_code.splitlines()
-                    + lines[bug.end_line :]
+                patched_script = "\n".join(
+                    lines[: bug.start_line - 1] + best.patch_code.splitlines() + lines[bug.end_line :]
                 )
-                patched_script = "\n".join(patched_lines)
                 tests_passed, tests_total = run_on_tests(patched_script, test_in)
-                all_pass = tests_passed == tests_total and tests_total is not None and tests_total > 0
-                logger.info(
-                    "  candidates=%d  tests=%s/%s",
-                    len(candidates), tests_passed, tests_total,
-                )
-            else:
-                logger.info("  candidates=%d  tests=no test dir found", len(candidates))
+            all_pass = tests_passed == tests_total and tests_total is not None and tests_total > 0
+            logger.info("  candidates=%d  tests=%s/%s", len(candidates), tests_passed, tests_total)
         else:
             logger.info("  candidates=%d", len(candidates))
 
