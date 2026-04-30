@@ -40,6 +40,32 @@ class BugInfo:
     test_file: Path | None = None
     project_dir: Path | None = None
 
+    def __post_init__(self) -> None:
+        if self.start_line < 1:
+            raise ValueError("start_line must be >= 1")
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must be >= start_line")
+        if self.fault_line < self.start_line or self.fault_line > self.end_line:
+            raise ValueError("fault_line must be within [start_line, end_line]")
+        lines = self.buggy_function.splitlines()
+        if not lines:
+            raise ValueError("buggy_function must not be empty")
+        fault_line_relative = self.fault_line - self.start_line + 1
+        if fault_line_relative < 1 or fault_line_relative > len(lines):
+            raise ValueError(
+                "fault_line is out of bounds for buggy_function content "
+                f"(relative line {fault_line_relative}, function has {len(lines)} lines)"
+            )
+
+    @property
+    def resolved_file_path(self) -> Path:
+        """Absolute path to the bug file, resolved against project_dir if needed."""
+        if self.file_path.is_absolute():
+            return self.file_path
+        if self.project_dir is not None:
+            return self.project_dir / self.file_path
+        return self.file_path
+
 
 @dataclass
 class PatchCandidate:
