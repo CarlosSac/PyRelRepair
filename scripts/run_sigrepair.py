@@ -43,48 +43,67 @@ def _candidate_to_dict(c: PatchCandidate) -> dict:
     }
 
 
-def _run_for_model(model: str, bugs: list[BugInfo], config: Config) -> dict:
+def _run_for_model(model: str, bugs: list[BugInfo], config: Config, debug: bool = False) -> dict:
     cfg = dataclasses.replace(config, ollama_model=model)
     model_slug = model.replace(":", "-").replace("/", "-")
     out_dir = Path("results") / f"sigrepair_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    debug_handler = None
+    if debug:
+        log_path = out_dir / "debug.log"
+        fmt = logging.Formatter("%(levelname)s %(name)s — %(message)s")
+        debug_handler = logging.FileHandler(log_path, encoding="utf-8")
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(fmt)
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        root.addHandler(debug_handler)
+        print(f"  Debug log → {log_path}")
+
     logger.info("--- Model: %s  →  %s/ ---", model, out_dir)
 
     results = []
-    for i, bug in enumerate(bugs, 1):
-        logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
-        candidates, token_stats = sig_repair(bug, cfg)
+    try:
+        for i, bug in enumerate(bugs, 1):
+            logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
+            candidates, token_stats = sig_repair(bug, cfg)
 
-        repaired = any(c.is_valid for c in candidates)
-        best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
-        val = best.validation if best else None
+            repaired = any(c.is_valid for c in candidates)
+            best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
+            val = best.validation if best else None
 
-        (out_dir / f"{bug.bug_id}.json").write_text(json.dumps({
-            "bug_id": bug.bug_id,
-            "function_name": bug.function_name,
-            "file_path": str(bug.file_path),
-            "fault_line": bug.fault_line,
-            "repaired": repaired,
-            "prompt_tokens": token_stats["prompt_tokens"],
-            "completion_tokens": token_stats["completion_tokens"],
-            "candidates": [_candidate_to_dict(c) for c in candidates],
-        }, indent=2), encoding="utf-8")
+            (out_dir / f"{bug.bug_id}.json").write_text(json.dumps({
+                "bug_id": bug.bug_id,
+                "function_name": bug.function_name,
+                "file_path": str(bug.file_path),
+                "fault_line": bug.fault_line,
+                "repaired": repaired,
+                "prompt_tokens": token_stats["prompt_tokens"],
+                "completion_tokens": token_stats["completion_tokens"],
+                "candidates": [_candidate_to_dict(c) for c in candidates],
+            }, indent=2), encoding="utf-8")
 
-        results.append({
-            "bug_id": bug.bug_id,
-            "num_candidates": len(candidates),
-            "repaired": repaired,
-            "tests_passed": val.num_passed if val else None,
-            "tests_failed": val.num_failed if val else None,
-            "prompt_tokens": token_stats["prompt_tokens"],
-            "completion_tokens": token_stats["completion_tokens"],
-        })
-        logger.info(
-            "  candidates=%d  repaired=%s  tests=%s/%s",
-            len(candidates), repaired,
-            val.num_passed if val else "-",
-            (val.num_passed + val.num_failed) if val else "-",
-        )
+            results.append({
+                "bug_id": bug.bug_id,
+                "num_candidates": len(candidates),
+                "repaired": repaired,
+                "tests_passed": val.num_passed if val else None,
+                "tests_failed": val.num_failed if val else None,
+                "prompt_tokens": token_stats["prompt_tokens"],
+                "completion_tokens": token_stats["completion_tokens"],
+            })
+            logger.info(
+                "  candidates=%d  repaired=%s  tests=%s/%s",
+                len(candidates), repaired,
+                val.num_passed if val else "-",
+                (val.num_passed + val.num_failed) if val else "-",
+            )
+    finally:
+        if debug_handler:
+            logging.getLogger().removeHandler(debug_handler)
+            debug_handler.close()
 
     n_repaired = sum(r["repaired"] for r in results)
     total_prompt = sum(r["prompt_tokens"] for r in results)
@@ -111,6 +130,7 @@ def main() -> None:
     parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
     parser.add_argument("--model", nargs="+", default=None, help="One or more Ollama models to compare")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Save full prompts and LLM responses to debug.log per model")
     args = parser.parse_args()
 
     if args.verbose:
@@ -140,7 +160,7 @@ def main() -> None:
 
     logger.info("Loaded %d bugs. Running %d model(s).", len(bugs), len(models))
 
-    summaries = [_run_for_model(m, bugs, config) for m in models]
+    summaries = [_run_for_model(m, bugs, config, debug=args.debug) for m in models]
 
     if len(summaries) == 1:
         s = summaries[0]
