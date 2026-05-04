@@ -4,9 +4,11 @@ Usage:
     python scripts/run_condefects.py [--n 10] [--base-only] [--debug]
                                      [--model qwen2.5-coder:3b deepseek-r1:7b ...]
 
-Results saved to results/condefects_<stage>_<model>_<timestamp>/
-  <bug_id>.json   — per-bug patch info and test results
-  summary.json    — aggregate stats
+Results saved to results/condefects_<stage>_<timestamp>/
+  <model>/
+    <bug_id>.json   — per-bug patch info and test results
+    summary.json    — aggregate stats for this model
+    debug.log       — full prompts and LLM responses (only with --debug)
 """
 from __future__ import annotations
 
@@ -38,101 +40,108 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _enable_debug(log_path: Path) -> None:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fmt = logging.Formatter("%(levelname)s %(name)s — %(message)s")
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-    print(f"Debug log → {log_path}")
-
-
-def _run_for_model(model: str, raw_bugs, config: Config, args) -> dict:
+def _run_for_model(model: str, raw_bugs, config: Config, args, run_dir: Path) -> dict:
     cfg = dataclasses.replace(config, ollama_model=model)
     has_tests = (args.data / "Test").is_dir()
 
     model_slug = model.replace(":", "-").replace("/", "-")
-    stage = "baserepair" if args.base_only else "pipeline"
-    out_dir = Path("results") / f"condefects_{stage}_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}"
+    out_dir = run_dir / model_slug
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-model debug log: attach a FileHandler, then remove it when done
+    debug_handler = None
+    if args.debug:
+        log_path = out_dir / "debug.log"
+        fmt = logging.Formatter("%(levelname)s %(name)s — %(message)s")
+        debug_handler = logging.FileHandler(log_path, encoding="utf-8")
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(fmt)
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        root.addHandler(debug_handler)
+        print(f"  Debug log → {log_path}")
+
     logger.info("--- Model: %s  →  %s/ ---", model, out_dir)
 
     results = []
-    for raw_bug in raw_bugs:
-        if len(results) >= args.n:
-            break
-        bug = condefects_to_buginfo(raw_bug)
-        if bug is None:
-            continue
+    try:
+        for raw_bug in raw_bugs:
+            if len(results) >= args.n:
+                break
+            bug = condefects_to_buginfo(raw_bug)
+            if bug is None:
+                continue
 
-        logger.info("[%d/%d] %s — %s()", len(results) + 1, args.n, bug.bug_id, bug.function_name)
-        test_in = get_test_dir(raw_bug, args.data) if has_tests else None
-        validator = make_validator(raw_bug, bug, test_in) if test_in else None
+            logger.info("[%d/%d] %s — %s()", len(results) + 1, args.n, bug.bug_id, bug.function_name)
+            test_in = get_test_dir(raw_bug, args.data) if has_tests else None
+            validator = make_validator(raw_bug, bug, test_in) if test_in else None
 
-        if args.base_only:
-            candidates, token_stats = base_repair(bug, cfg, validator=validator)
-            best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
-            row = {
-                "bug_id": bug.bug_id,
-                "function_name": bug.function_name,
-                "base_candidates": len(candidates),
-                "sig_candidates": 0,
-                "prompt_tokens": token_stats["prompt_tokens"],
-                "completion_tokens": token_stats["completion_tokens"],
-                "tests_passed": None, "tests_total": None,
-                "all_tests_passed": False,
-                "best_stage": "BaseRepair" if any(c.is_valid for c in candidates) else None,
-            }
-            if best and test_in:
-                if best.validation is not None:
-                    passed = best.validation.num_passed
-                    total = best.validation.num_passed + best.validation.num_failed
+            if args.base_only:
+                candidates, token_stats = base_repair(bug, cfg, validator=validator)
+                best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
+                row = {
+                    "bug_id": bug.bug_id,
+                    "function_name": bug.function_name,
+                    "base_candidates": len(candidates),
+                    "sig_candidates": 0,
+                    "prompt_tokens": token_stats["prompt_tokens"],
+                    "completion_tokens": token_stats["completion_tokens"],
+                    "tests_passed": None, "tests_total": None,
+                    "all_tests_passed": False,
+                    "best_stage": "BaseRepair" if any(c.is_valid for c in candidates) else None,
+                }
+                if best and test_in:
+                    if best.validation is not None:
+                        passed = best.validation.num_passed
+                        total = best.validation.num_passed + best.validation.num_failed
+                    else:
+                        original = raw_bug.buggy_file.read_text(encoding="utf-8")
+                        patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
+                        passed, total = run_on_tests(patched, test_in)
+                    row["tests_passed"] = passed
+                    row["tests_total"] = total
+                    row["all_tests_passed"] = passed == total and total > 0
+                    logger.info("  base=%d  tests=%d/%d", len(candidates), passed, total)
                 else:
-                    original = raw_bug.buggy_file.read_text(encoding="utf-8")
-                    patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
-                    passed, total = run_on_tests(patched, test_in)
-                row["tests_passed"] = passed
-                row["tests_total"] = total
-                row["all_tests_passed"] = passed == total and total > 0
-                logger.info("  base=%d  tests=%d/%d", len(candidates), passed, total)
+                    logger.info("  base=%d", len(candidates))
             else:
-                logger.info("  base=%d", len(candidates))
-        else:
-            pr: PipelineResult = run_pipeline(bug, cfg, validator=validator)
-            best = pr.best_candidate
-            row = {
-                "bug_id": bug.bug_id,
-                "function_name": bug.function_name,
-                "base_candidates": len(pr.base_candidates),
-                "sig_candidates": len(pr.sig_candidates),
-                "prompt_tokens": pr.total_prompt_tokens,
-                "completion_tokens": pr.total_completion_tokens,
-                "tests_passed": None, "tests_total": None,
-                "all_tests_passed": False, "best_stage": None,
-            }
-            if best and test_in:
-                if best.validation is not None:
-                    passed = best.validation.num_passed
-                    total = best.validation.num_passed + best.validation.num_failed
+                pr: PipelineResult = run_pipeline(bug, cfg, validator=validator)
+                best = pr.best_candidate
+                row = {
+                    "bug_id": bug.bug_id,
+                    "function_name": bug.function_name,
+                    "base_candidates": len(pr.base_candidates),
+                    "sig_candidates": len(pr.sig_candidates),
+                    "prompt_tokens": pr.total_prompt_tokens,
+                    "completion_tokens": pr.total_completion_tokens,
+                    "tests_passed": None, "tests_total": None,
+                    "all_tests_passed": False, "best_stage": None,
+                }
+                if best and test_in:
+                    if best.validation is not None:
+                        passed = best.validation.num_passed
+                        total = best.validation.num_passed + best.validation.num_failed
+                    else:
+                        original = raw_bug.buggy_file.read_text(encoding="utf-8")
+                        patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
+                        passed, total = run_on_tests(patched, test_in)
+                    row["tests_passed"] = passed
+                    row["tests_total"] = total
+                    row["all_tests_passed"] = passed == total and total > 0
+                    row["best_stage"] = best.stage
+                    logger.info("  base=%d  sig=%d  tests=%d/%d  stage=%s",
+                                row["base_candidates"], row["sig_candidates"], passed, total, best.stage)
                 else:
-                    original = raw_bug.buggy_file.read_text(encoding="utf-8")
-                    patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
-                    passed, total = run_on_tests(patched, test_in)
-                row["tests_passed"] = passed
-                row["tests_total"] = total
-                row["all_tests_passed"] = passed == total and total > 0
-                row["best_stage"] = best.stage
-                logger.info("  base=%d  sig=%d  tests=%d/%d  stage=%s",
-                            row["base_candidates"], row["sig_candidates"], passed, total, best.stage)
-            else:
-                logger.info("  base=%d  sig=%d", row["base_candidates"], row["sig_candidates"])
+                    logger.info("  base=%d  sig=%d", row["base_candidates"], row["sig_candidates"])
 
-        (out_dir / f"{bug.bug_id}.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
-        results.append(row)
+            (out_dir / f"{bug.bug_id}.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+            results.append(row)
+
+    finally:
+        if debug_handler:
+            logging.getLogger().removeHandler(debug_handler)
+            debug_handler.close()
 
     n_base = sum(1 for r in results if r["base_candidates"] > 0)
     n_sig = sum(1 for r in results if r["sig_candidates"] > 0)
@@ -162,17 +171,11 @@ def main() -> None:
     parser.add_argument("--data", type=Path, default=Path("data/condefects"))
     parser.add_argument("--model", nargs="+", default=None, help="One or more Ollama models to compare")
     parser.add_argument("--base-only", action="store_true", help="Run BaseRepair only, skip SigRepair")
-    parser.add_argument("--debug", action="store_true", help="Save full prompts and LLM responses to a log file")
+    parser.add_argument("--debug", action="store_true", help="Save full prompts and LLM responses to debug.log per model")
     args = parser.parse_args()
 
     config = Config()
     models = args.model or [config.ollama_model]
-
-    if args.debug:
-        stage = "baserepair" if args.base_only else "pipeline"
-        model_slug = "_".join(m.replace(":", "-").replace("/", "-") for m in models)
-        log_path = Path("results") / f"condefects_{stage}_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}_debug.log"
-        _enable_debug(log_path)
 
     for model in list(models):
         cfg = dataclasses.replace(config, ollama_model=model)
@@ -188,10 +191,15 @@ def main() -> None:
                      config.embed_model, config.embed_model)
         sys.exit(1)
 
+    stage = "baserepair" if args.base_only else "pipeline"
+    run_dir = Path("results") / f"condefects_{stage}_{datetime.now():%Y%m%d_%H%M%S}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Run directory: %s/", run_dir)
+
     logger.info("Loading bugs from %s ...", args.data)
     raw_bugs = load_bugs(args.data, max_bugs=args.n * 3)
 
-    summaries = [_run_for_model(m, raw_bugs, config, args) for m in models]
+    summaries = [_run_for_model(m, raw_bugs, config, args, run_dir) for m in models]
 
     label = "BaseRepair" if args.base_only else "Pipeline"
     if len(summaries) == 1:
@@ -208,17 +216,18 @@ def main() -> None:
         print(f"Tokens (output)   : {s['total_completion_tokens']:,}")
         if n_with:
             print(f"All tests pass    : {s['n_pass']}/{n_with}")
-        print(f"Results saved     : {s['out_dir']}/")
+        print(f"Results saved     : {run_dir}/")
     else:
         print(f"\n=== {label} Comparison (ConDefects) ===")
         col = 26
-        print(f"{'Model':<{col}}  {'Base patches':<14}  {'Tests pass':<12}  {'Prompt tok':>12}  {'Output tok':>12}  Results")
-        print("-" * 100)
+        print(f"{'Model':<{col}}  {'Base patches':<14}  {'Tests pass':<12}  {'Prompt tok':>12}  {'Output tok':>12}")
+        print("-" * 90)
         for s in summaries:
             total = s["bugs_evaluated"]
             n_with = sum(1 for r in s["bugs"] if r["tests_total"] is not None)
             tests = f"{s['n_pass']}/{n_with}" if n_with else "n/a"
-            print(f"{s['model']:<{col}}  {s['n_base']}/{total:<12}  {tests:<12}  {s['total_prompt_tokens']:>12,}  {s['total_completion_tokens']:>12,}  {s['out_dir']}/")
+            print(f"{s['model']:<{col}}  {s['n_base']}/{total:<12}  {tests:<12}  {s['total_prompt_tokens']:>12,}  {s['total_completion_tokens']:>12,}")
+        print(f"\nResults saved: {run_dir}/")
 
 
 if __name__ == "__main__":
