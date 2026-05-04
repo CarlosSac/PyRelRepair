@@ -7,7 +7,7 @@ from pathlib import Path
 @dataclass
 class Config:
     # LLM settings
-    ollama_model: str = "gemma4:e4b" # default model
+    ollama_model: str = "qwen2.5-coder:3b"
     ollama_base_url: str = "http://localhost:11434"
     temperature: float = 1.0
     llm_timeout: int = 300  # seconds per LLM request
@@ -16,7 +16,7 @@ class Config:
     base_num_patches: int = 1
 
     # SigRepair
-    sig_num_iterations: int = 20
+    sig_num_iterations: int = 3  # TODO: set back to 20 for final runs
     sig_num_patches_per_iter: int = 1
     sig_top_k: int = 25
     sig_num_root_causes: int = 2
