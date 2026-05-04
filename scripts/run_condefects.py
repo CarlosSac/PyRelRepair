@@ -48,16 +48,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run repair pipeline on ConDefects")
     parser.add_argument("--n", type=int, default=10)
     parser.add_argument("--data", type=Path, default=Path("data/condefects"))
+    parser.add_argument("--model", type=str, default=None, help="Ollama model to use (overrides config)")
     parser.add_argument("--base-only", action="store_true", help="Run BaseRepair only, skip SigRepair")
     parser.add_argument("--debug", action="store_true", help="Save full prompts and LLM responses to a log file")
     args = parser.parse_args()
 
+    config = Config()
+    if args.model:
+        config.ollama_model = args.model
+
+    model_slug = config.ollama_model.replace(":", "-").replace("/", "-")
+
     if args.debug:
         stage = "baserepair" if args.base_only else "pipeline"
-        log_path = Path("results") / f"condefects_{stage}_{datetime.now():%Y%m%d_%H%M%S}_debug.log"
+        log_path = Path("results") / f"condefects_{stage}_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}_debug.log"
         _enable_debug(log_path)
 
-    config = Config()
     client = OllamaClient(config)
 
     if not client.is_available():

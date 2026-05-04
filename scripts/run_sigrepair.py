@@ -46,6 +46,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run SigRepair on BugsInPy")
     parser.add_argument("--n", type=int, default=6, help="Number of bugs to evaluate")
     parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
+    parser.add_argument("--model", type=str, default=None, help="Ollama model to use (overrides config)")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -54,6 +55,9 @@ def main() -> None:
         logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     config = Config()
+    if args.model:
+        config.ollama_model = args.model
+
     client = OllamaClient(config)
 
     if not client.is_available():
@@ -71,7 +75,8 @@ def main() -> None:
         logger.error("No bugs found in %s — run bugsinpy_setup.py first.", args.data)
         sys.exit(1)
 
-    out_dir = Path("results") / f"sigrepair_{datetime.now():%Y%m%d_%H%M%S}"
+    model_slug = config.ollama_model.replace(":", "-").replace("/", "-")
+    out_dir = Path("results") / f"sigrepair_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Saving results to %s/", out_dir)
     logger.info("Loaded %d bugs. Model: %s", len(bugs), config.ollama_model)
