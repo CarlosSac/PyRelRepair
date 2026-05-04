@@ -21,24 +21,51 @@ def set_verbose() -> None:
 
 
 def condefects_to_buginfo(bug: ConDefectsBug) -> BugInfo | None:
-    """Convert a ConDefectsBug to BugInfo by finding the function at the fault line."""
+    """Convert a ConDefectsBug to BugInfo.
+
+    Prefers the innermost function containing the fault line.
+    Falls back to the full script when the fault is at module level.
+    """
     functions = extract_functions(bug.buggy_code, bug.buggy_file)
     containing = [f for f in functions if f.start_line <= bug.fault_line <= f.end_line]
-    if not containing:
+
+    if containing:
+        func = min(containing, key=lambda f: f.end_line - f.start_line)
+        return BugInfo(
+            bug_id=f"{bug.task_id}_{bug.submission_id}",
+            file_path=bug.buggy_file,
+            function_name=func.name,
+            buggy_function=func.body,
+            fault_line=bug.fault_line,
+            start_line=func.start_line,
+            end_line=func.end_line,
+            error_message="Wrong Answer",
+            test_output="",
+            project_dir=None,
+        )
+
+    # Module-level code: use the entire script as the "function"
+    lines = bug.buggy_code.splitlines()
+    end_line = len(lines)
+    if not lines or not (1 <= bug.fault_line <= end_line):
         logger.debug(
-            "Skipping %s/%s: fault line %d not inside any function",
-            bug.task_id, bug.submission_id, bug.fault_line,
+            "Skipping %s/%s: fault line %d out of range (script has %d lines)",
+            bug.task_id, bug.submission_id, bug.fault_line, end_line,
         )
         return None
-    func = min(containing, key=lambda f: f.end_line - f.start_line)
+
+    logger.debug(
+        "Module-level bug %s/%s: using full script (fault line %d)",
+        bug.task_id, bug.submission_id, bug.fault_line,
+    )
     return BugInfo(
         bug_id=f"{bug.task_id}_{bug.submission_id}",
         file_path=bug.buggy_file,
-        function_name=func.name,
-        buggy_function=func.body,
+        function_name="<module>",
+        buggy_function=bug.buggy_code,
         fault_line=bug.fault_line,
-        start_line=func.start_line,
-        end_line=func.end_line,
+        start_line=1,
+        end_line=end_line,
         error_message="Wrong Answer",
         test_output="",
         project_dir=None,
