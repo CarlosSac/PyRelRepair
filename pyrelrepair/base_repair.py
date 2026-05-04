@@ -86,17 +86,19 @@ def base_repair(
     bug: BugInfo,
     config: Config,
     validator: ValidatorFn | None = None,
-) -> list[PatchCandidate]:
+) -> tuple[list[PatchCandidate], dict[str, int]]:
     """Execute the BaseRepair stage.
 
     Generates config.base_num_patches candidate patches (default: 1)
     using only the buggy function, error message, and test output.
 
     Returns:
-        List of PatchCandidate objects (validated).
+        (candidates, token_stats) where token_stats has keys
+        'prompt_tokens' and 'completion_tokens'.
     """
     llm = OllamaClient(config)
     candidates = []
+    token_stats: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
 
     fault_line_relative = bug.fault_line - bug.start_line + 1
     fault_content, fault_ctx = fault_context(bug.buggy_function, fault_line_relative)
@@ -120,22 +122,21 @@ def base_repair(
     responses = llm.generate(prompt, num_return=config.base_num_patches)
 
     for i, response in enumerate(responses):
+        token_stats["prompt_tokens"] += response.prompt_tokens
+        token_stats["completion_tokens"] += response.completion_tokens
         logger.debug("BaseRepair response %d: %s", i, response.text[:200])
 
-        # Extract the function from LLM output
         patched_func = extract_function_from_response(response.text)
         if patched_func is None:
             logger.warning("BaseRepair: could not extract function from response %d", i)
             continue
 
-        # Syntax check
         if not validate_syntax(patched_func):
             logger.warning("BaseRepair: patch %d has syntax errors", i)
             continue
 
         candidate = PatchCandidate(patch_code=patched_func, stage="BaseRepair")
 
-        # Validate against test suite if project info is available
         if bug.project_dir and bug.file_path.exists():
             patched_source = apply_patch(
                 original_file=bug.file_path,
@@ -144,7 +145,6 @@ def base_repair(
                 start_line=bug.start_line,
                 end_line=bug.end_line,
             )
-
             result = validate_patch(
                 project_dir=bug.project_dir,
                 original_file=bug.file_path,
@@ -153,11 +153,10 @@ def base_repair(
                 config=config,
             )
             candidate.validation = result
-
             if result.passed:
                 logger.info("BaseRepair: patch %d PASSED all tests!", i)
                 candidates.append(candidate)
-                return candidates  # early stop on success
+                return candidates, token_stats
             else:
                 logger.info(
                     "BaseRepair: patch %d failed (%d passed, %d failed, %d errors)",
@@ -171,8 +170,8 @@ def base_repair(
                 if result.passed:
                     logger.info("BaseRepair: patch %d PASSED (external validator)!", i)
                     candidates.append(candidate)
-                    return candidates  # early stop on success
+                    return candidates, token_stats
 
         candidates.append(candidate)
 
-    return candidates
+    return candidates, token_stats

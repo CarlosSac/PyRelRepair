@@ -1,4 +1,4 @@
-"""Run the full repair pipeline (BaseRepair → SigRepair) on ConDefects bugs.
+"""Run the full repair pipeline (BaseRepair -> SigRepair) on ConDefects bugs.
 
 Usage:
     python scripts/run_pipeline.py [--n 10] [--data data/condefects]
@@ -7,116 +7,27 @@ from __future__ import annotations
 
 import argparse
 import logging
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))  # repo root
+sys.path.insert(0, str(Path(__file__).parent))          # scripts/
 
-from pyrelrepair.base_repair import BugInfo, PatchCandidate
-from pyrelrepair.code_parser import extract_functions
 from pyrelrepair.config import Config
-from pyrelrepair.condefects_loader import ConDefectsBug, load_bugs
+from pyrelrepair.condefects_loader import load_bugs
 from pyrelrepair.llm import OllamaClient
 from pyrelrepair.pipeline import PipelineResult, run_pipeline
-from pyrelrepair.validator import ValidationResult
+from condefects_utils import (
+    condefects_to_buginfo,
+    get_test_dir,
+    make_validator,
+    patch_script,
+    run_on_tests,
+    set_verbose,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _set_verbose() -> None:
-    logging.getLogger().setLevel(logging.DEBUG)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-
-def condefects_to_buginfo(bug: ConDefectsBug) -> BugInfo | None:
-    functions = extract_functions(bug.buggy_code, bug.buggy_file)
-    containing = [f for f in functions if f.start_line <= bug.fault_line <= f.end_line]
-    if not containing:
-        logger.debug(
-            "Skipping %s/%s: fault line %d not inside any function",
-            bug.task_id, bug.submission_id, bug.fault_line,
-        )
-        return None
-    func = min(containing, key=lambda f: f.end_line - f.start_line)
-    return BugInfo(
-        bug_id=f"{bug.task_id}_{bug.submission_id}",
-        file_path=bug.buggy_file,
-        function_name=func.name,
-        buggy_function=func.body,
-        fault_line=bug.fault_line,
-        start_line=func.start_line,
-        end_line=func.end_line,
-        error_message="Wrong Answer",
-        test_output="",
-        project_dir=None,
-    )
-
-
-def get_test_dir(bug: ConDefectsBug, condefects_dir: Path) -> Path | None:
-    parts = bug.task_id.split("_")
-    if len(parts) != 2:
-        return None
-    contest, letter = parts[0], parts[1].upper()
-    test_in = condefects_dir / "Test" / contest / letter / "in"
-    if test_in.is_dir():
-        return test_in
-    ex_in = condefects_dir / "Test" / contest / "Ex" / "in"
-    return ex_in if ex_in.is_dir() else None
-
-
-def run_on_tests(code: str, test_in_dir: Path, timeout: int = 10) -> tuple[int, int]:
-    out_dir = test_in_dir.parent / "out"
-    passed = total = 0
-    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", encoding="utf-8", delete=False) as tmp:
-        tmp.write(code)
-        tmp_path = Path(tmp.name)
-    try:
-        for in_file in sorted(test_in_dir.iterdir()):
-            expected_file = out_dir / in_file.name
-            if not expected_file.exists():
-                continue
-            total += 1
-            try:
-                result = subprocess.run(
-                    [sys.executable, str(tmp_path)],
-                    input=in_file.read_text(encoding="utf-8", errors="ignore"),
-                    capture_output=True, text=True, timeout=timeout,
-                )
-                actual = result.stdout.rstrip("\n")
-                expected = expected_file.read_text(encoding="utf-8", errors="ignore").rstrip("\n")
-                if actual == expected:
-                    passed += 1
-            except (subprocess.TimeoutExpired, Exception):
-                pass
-    finally:
-        tmp_path.unlink(missing_ok=True)
-    return passed, total
-
-
-def make_validator(raw_bug: ConDefectsBug, bug: BugInfo, test_in: Path):
-    def validate(candidate: PatchCandidate) -> ValidationResult | None:
-        original = raw_bug.buggy_file.read_text(encoding="utf-8")
-        patched = patch_script(original, candidate.patch_code, bug.start_line, bug.end_line)
-        passed, total = run_on_tests(patched, test_in)
-        return ValidationResult(
-            passed=passed == total and total > 0,
-            output=f"{passed}/{total} tests passed",
-            return_code=0 if passed == total else 1,
-            num_passed=passed,
-            num_failed=total - passed,
-            num_errors=0,
-        )
-    return validate
-
-
-def patch_script(original: str, patch_code: str, start_line: int, end_line: int) -> str:
-    lines = original.splitlines()
-    return "\n".join(
-        lines[: start_line - 1] + patch_code.splitlines() + lines[end_line:]
-    )
 
 
 def main() -> None:
@@ -127,12 +38,20 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.verbose:
-        _set_verbose()
+        set_verbose()
 
     config = Config()
     client = OllamaClient(config)
+
     if not client.is_available():
         logger.error("Ollama is not running or model '%s' not found.", config.ollama_model)
+        sys.exit(1)
+
+    if not client.is_model_available(config.embed_model):
+        logger.error(
+            "Embedding model '%s' not found. Run: ollama pull %s",
+            config.embed_model, config.embed_model,
+        )
         sys.exit(1)
 
     has_tests = (args.data / "Test").is_dir()
@@ -143,6 +62,7 @@ def main() -> None:
     raw_bugs = load_bugs(args.data, max_bugs=args.n * 3)
 
     results = []
+
     for raw_bug in raw_bugs:
         if len(results) >= args.n:
             break
@@ -151,7 +71,9 @@ def main() -> None:
         if bug is None:
             continue
 
-        logger.info("[%d/%d] %s — function: %s", len(results) + 1, args.n, bug.bug_id, bug.function_name)
+        logger.info(
+            "[%d/%d] %s — function: %s", len(results) + 1, args.n, bug.bug_id, bug.function_name
+        )
 
         test_in = get_test_dir(raw_bug, args.data) if has_tests else None
         validator = make_validator(raw_bug, bug, test_in) if test_in else None
@@ -161,6 +83,8 @@ def main() -> None:
             "bug_id": bug.bug_id,
             "base_candidates": len(pipeline_result.base_candidates),
             "sig_candidates": len(pipeline_result.sig_candidates),
+            "prompt_tokens": pipeline_result.total_prompt_tokens,
+            "completion_tokens": pipeline_result.total_completion_tokens,
             "tests_passed": None,
             "tests_total": None,
             "all_tests_passed": False,
@@ -169,8 +93,6 @@ def main() -> None:
 
         best = pipeline_result.best_candidate
         if best and test_in:
-            # Reuse validation already done by the in-pipeline validator if available,
-            # otherwise run tests now (e.g. for BaseRepair candidates).
             if best.validation is not None:
                 passed = best.validation.num_passed
                 total = best.validation.num_passed + best.validation.num_failed
@@ -182,28 +104,34 @@ def main() -> None:
             row["tests_total"] = total
             row["all_tests_passed"] = passed == total and total > 0
             row["best_stage"] = best.stage
-            logger.info("  base=%d  sig=%d  tests=%d/%d  stage=%s",
-                row["base_candidates"], row["sig_candidates"], passed, total, best.stage)
+            logger.info(
+                "  base=%d  sig=%d  tests=%d/%d  stage=%s",
+                row["base_candidates"], row["sig_candidates"], passed, total, best.stage,
+            )
         else:
             logger.info("  base=%d  sig=%d", row["base_candidates"], row["sig_candidates"])
 
         results.append(row)
 
-    # Summary
     total = len(results)
     n_base = sum(1 for r in results if r["base_candidates"] > 0)
     n_sig = sum(1 for r in results if r["sig_candidates"] > 0)
+    total_prompt = sum(r["prompt_tokens"] for r in results)
+    total_completion = sum(r["completion_tokens"] for r in results)
 
     print("\n=== Pipeline Results ===")
     print(f"Model             : {config.ollama_model}")
     print(f"Bugs evaluated    : {total}")
     print(f"BaseRepair patches: {n_base}/{total}")
     print(f"SigRepair patches : {n_sig}/{total}")
+    print(f"Tokens (prompt)   : {total_prompt:,}")
+    print(f"Tokens (output)   : {total_completion:,}")
+    print(f"Tokens (total)    : {total_prompt + total_completion:,}")
 
     if has_tests:
         n_pass = sum(r["all_tests_passed"] for r in results)
         n_with_tests = sum(1 for r in results if r["tests_total"] is not None)
-        by_stage = {}
+        by_stage: dict[str, int] = {}
         for r in results:
             if r["all_tests_passed"] and r["best_stage"]:
                 by_stage[r["best_stage"]] = by_stage.get(r["best_stage"], 0) + 1

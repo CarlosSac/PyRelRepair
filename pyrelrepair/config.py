@@ -7,7 +7,7 @@ from pathlib import Path
 @dataclass
 class Config:
     # LLM settings
-    ollama_model: str = "qwen2.5-coder:32b"
+    ollama_model: str = "gemma4:e4b" # default model
     ollama_base_url: str = "http://localhost:11434"
     temperature: float = 1.0
     llm_timeout: int = 300  # seconds per LLM request

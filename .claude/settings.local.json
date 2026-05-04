@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(.venv/Scripts/python scripts/test_api.py)",
+      "Bash(.venv/Scripts/python -c \"import sys; sys.path.insert\\(0,'scripts'\\); import condefects_utils; print\\('condefects_utils OK'\\)\")",
+      "Bash(.venv/Scripts/python scripts/run_pipeline.py --help)"
+    ]
+  }
+}

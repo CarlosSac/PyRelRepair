@@ -23,6 +23,8 @@ class PipelineResult:
     base_candidates: list[PatchCandidate] = field(default_factory=list)
     sig_candidates: list[PatchCandidate] = field(default_factory=list)
     passing_stage: str | None = None
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
 
     @property
     def passed(self) -> bool:
@@ -50,7 +52,9 @@ def run_pipeline(
 
     # Stage 1: BaseRepair
     logger.info("Pipeline [%s]: running BaseRepair", bug.bug_id)
-    result.base_candidates = base_repair(bug, config, validator=validator)
+    result.base_candidates, base_tokens = base_repair(bug, config, validator=validator)
+    result.total_prompt_tokens += base_tokens["prompt_tokens"]
+    result.total_completion_tokens += base_tokens["completion_tokens"]
 
     if any(c.is_valid for c in result.base_candidates):
         result.passing_stage = "BaseRepair"
@@ -59,7 +63,9 @@ def run_pipeline(
 
     # Stage 2: SigRepair
     logger.info("Pipeline [%s]: BaseRepair failed, escalating to SigRepair", bug.bug_id)
-    result.sig_candidates = sig_repair(bug, config, validator=validator)
+    result.sig_candidates, sig_tokens = sig_repair(bug, config, validator=validator)
+    result.total_prompt_tokens += sig_tokens["prompt_tokens"]
+    result.total_completion_tokens += sig_tokens["completion_tokens"]
 
     if any(c.is_valid for c in result.sig_candidates):
         result.passing_stage = "SigRepair"
