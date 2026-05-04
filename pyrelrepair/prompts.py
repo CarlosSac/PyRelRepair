@@ -39,7 +39,9 @@ Surrounding context:
 
 ## Task
 Fix the bug. Return ONLY the complete corrected function \
-enclosed in a single ```python code block. Do not include any explanation.
+enclosed in a single ```python code block. \
+Do not include line numbers, arrows, or any other annotations. \
+Do not include any explanation.
 """
 
 # ConDefects script-level repair
@@ -67,7 +69,9 @@ Surrounding context:
 
 ## Task
 Fix the bug. Return ONLY the complete corrected script \
-enclosed in a single ```python code block. Do not include any explanation.
+enclosed in a single ```python code block. \
+Do not include line numbers, arrows, or any other annotations. \
+Do not include any explanation.
 """
 
 # SigRepair: Query Rewriting
@@ -131,7 +135,9 @@ The following function signatures from the same project may be useful for the re
 ## Task
 Using the relevant function signatures above as context, fix the bug. \
 Return ONLY the complete corrected function enclosed in a single \
-```python code block. Do not include any explanation.
+```python code block. \
+Do not include line numbers, arrows, or any other annotations. \
+Do not include any explanation.
 """
 
 
