@@ -1,48 +1,57 @@
-"""Run SigRepair on a sample of ConDefects Python bugs.
-
-Each ConDefects bug is a standalone script. We find the function that contains
-the fault line and use all other functions in that same script as the signature
-retrieval pool.
+"""Run SigRepair on BugsInPy bugs.
 
 Usage:
-    python scripts/run_sigrepair.py [--n 10] [--data data/condefects]
+    python scripts/run_sigrepair.py [--n 6] [--data data/bugsinpy_checked]
+
+Results saved to results/sigrepair_<timestamp>/
+  <bug_id>.json   — per-bug patch candidates + validation output
+  summary.json    — aggregate stats
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))  # repo root
-sys.path.insert(0, str(Path(__file__).parent))          # scripts/
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pyrelrepair.base_repair import PatchCandidate
+from pyrelrepair.bugsinpy_loader import load_bugs
 from pyrelrepair.config import Config
-from pyrelrepair.condefects_loader import load_bugs
 from pyrelrepair.llm import OllamaClient
 from pyrelrepair.sig_repair import sig_repair
-from condefects_utils import (
-    condefects_to_buginfo,
-    get_test_dir,
-    make_validator,
-    patch_script,
-    run_on_tests,
-    set_verbose,
-)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def _candidate_to_dict(c: PatchCandidate) -> dict:
+    v = c.validation
+    return {
+        "stage": c.stage,
+        "patch_code": c.patch_code,
+        "passed": v.passed if v else None,
+        "tests_passed": v.num_passed if v else None,
+        "tests_failed": v.num_failed if v else None,
+        "num_errors": v.num_errors if v else None,
+        "return_code": v.return_code if v else None,
+        "validation_output": v.output if v else None,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run SigRepair on ConDefects")
-    parser.add_argument("--n", type=int, default=10, help="Number of bugs to evaluate")
-    parser.add_argument("--data", type=Path, default=Path("data/condefects"))
+    parser = argparse.ArgumentParser(description="Run SigRepair on BugsInPy")
+    parser.add_argument("--n", type=int, default=6, help="Number of bugs to evaluate")
+    parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     if args.verbose:
-        set_verbose()
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     config = Config()
     client = OllamaClient(config)
@@ -50,7 +59,6 @@ def main() -> None:
     if not client.is_available():
         logger.error("Ollama is not running or model '%s' not found.", config.ollama_model)
         sys.exit(1)
-
     if not client.is_model_available(config.embed_model):
         logger.error(
             "Embedding model '%s' not found. Run: ollama pull %s",
@@ -58,92 +66,80 @@ def main() -> None:
         )
         sys.exit(1)
 
-    has_tests = (args.data / "Test").is_dir()
-    if not has_tests:
-        logger.warning("Test/ directory not found — syntax validation only.")
+    bugs = load_bugs(args.data, max_bugs=args.n)
+    if not bugs:
+        logger.error("No bugs found in %s — run bugsinpy_setup.py first.", args.data)
+        sys.exit(1)
 
-    logger.info("Loading bugs from %s ...", args.data)
-    raw_bugs = load_bugs(args.data, max_bugs=args.n * 3)
+    out_dir = Path("results") / f"sigrepair_{datetime.now():%Y%m%d_%H%M%S}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Saving results to %s/", out_dir)
+    logger.info("Loaded %d bugs. Model: %s", len(bugs), config.ollama_model)
 
     results = []
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
+    for i, bug in enumerate(bugs, 1):
+        logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
+        candidates, token_stats = sig_repair(bug, config)
 
-    for raw_bug in raw_bugs:
-        if len(results) >= args.n:
-            break
+        repaired = any(c.is_valid for c in candidates)
+        best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
+        val = best.validation if best else None
 
-        bug = condefects_to_buginfo(raw_bug)
-        if bug is None:
-            continue
-
-        logger.info(
-            "[%d/%d] %s (fault line %d, function %s)",
-            len(results) + 1, args.n, bug.bug_id, bug.fault_line, bug.function_name,
+        bug_result = {
+            "bug_id": bug.bug_id,
+            "function_name": bug.function_name,
+            "file_path": str(bug.file_path),
+            "fault_line": bug.fault_line,
+            "repaired": repaired,
+            "prompt_tokens": token_stats["prompt_tokens"],
+            "completion_tokens": token_stats["completion_tokens"],
+            "candidates": [_candidate_to_dict(c) for c in candidates],
+        }
+        (out_dir / f"{bug.bug_id}.json").write_text(
+            json.dumps(bug_result, indent=2), encoding="utf-8"
         )
 
-        test_in = get_test_dir(raw_bug, args.data) if has_tests else None
-        validator = make_validator(raw_bug, bug, test_in) if test_in else None
-        candidates, token_stats = sig_repair(bug, config, validator=validator)
-        total_prompt_tokens += token_stats["prompt_tokens"]
-        total_completion_tokens += token_stats["completion_tokens"]
-
-        best = None
-        if candidates:
-            passing = [c for c in candidates if c.is_valid]
-            best = passing[0] if passing else candidates[-1]
-
-        tests_passed = tests_total = None
-        all_pass = False
-
-        if best and test_in:
-            if best.validation is not None:
-                tests_passed = best.validation.num_passed
-                tests_total = best.validation.num_passed + best.validation.num_failed
-            else:
-                original = raw_bug.buggy_file.read_text(encoding="utf-8")
-                patched_script = patch_script(
-                    original, best.patch_code, bug.start_line, bug.end_line
-                )
-                tests_passed, tests_total = run_on_tests(patched_script, test_in)
-            all_pass = tests_passed == tests_total and tests_total is not None and tests_total > 0
-            logger.info(
-                "  candidates=%d  tests=%s/%s", len(candidates), tests_passed, tests_total
-            )
-        else:
-            logger.info("  candidates=%d", len(candidates))
-
-        results.append({
+        row = {
             "bug_id": bug.bug_id,
-            "function": bug.function_name,
             "num_candidates": len(candidates),
-            "tests_passed": tests_passed,
-            "tests_total": tests_total,
-            "all_tests_passed": all_pass,
-        })
+            "repaired": repaired,
+            "tests_passed": val.num_passed if val else None,
+            "tests_failed": val.num_failed if val else None,
+            "prompt_tokens": token_stats["prompt_tokens"],
+            "completion_tokens": token_stats["completion_tokens"],
+        }
+        results.append(row)
+        logger.info(
+            "  candidates=%d  repaired=%s  tests=%s/%s",
+            len(candidates), repaired,
+            val.num_passed if val else "-",
+            (val.num_passed + val.num_failed) if val else "-",
+        )
 
     total = len(results)
-    n_with_candidates = sum(1 for r in results if r["num_candidates"] > 0)
+    n_repaired = sum(r["repaired"] for r in results)
+    total_prompt = sum(r["prompt_tokens"] for r in results)
+    total_completion = sum(r["completion_tokens"] for r in results)
 
-    print("\n=== SigRepair Results ===")
-    print(f"Model            : {config.ollama_model}")
-    print(f"Bugs evaluated   : {total}")
-    print(f"Bugs with patches: {n_with_candidates}/{total}")
-    print(f"Tokens (prompt)  : {total_prompt_tokens:,}")
-    print(f"Tokens (output)  : {total_completion_tokens:,}")
-    print(f"Tokens (total)   : {total_prompt_tokens + total_completion_tokens:,}")
+    summary = {
+        "model": config.ollama_model,
+        "bugs_evaluated": total,
+        "repaired": n_repaired,
+        "repair_rate": round(n_repaired / total, 4) if total else 0,
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "bugs": results,
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    if has_tests:
-        n_all_pass = sum(r["all_tests_passed"] for r in results)
-        n_with_tests = sum(1 for r in results if r["tests_total"] is not None)
-        print(f"Bugs with tests  : {n_with_tests}/{total}")
-        if n_with_tests:
-            print(
-                f"All tests pass   : {n_all_pass}/{n_with_tests} "
-                f"({100 * n_all_pass / n_with_tests:.1f}%)"
-            )
-    else:
-        print("(Download Test.zip for full validation)")
+    print("\n=== SigRepair Results (BugsInPy) ===")
+    print(f"Model          : {config.ollama_model}")
+    print(f"Bugs evaluated : {total}")
+    print(f"Repaired       : {n_repaired}/{total} ({100*n_repaired/total:.1f}%)" if total else "Repaired: 0")
+    print(f"Tokens (prompt): {total_prompt:,}")
+    print(f"Tokens (output): {total_completion:,}")
+    print(f"Tokens (total) : {total_prompt + total_completion:,}")
+    print(f"Results saved  : {out_dir}/")
 
 
 if __name__ == "__main__":

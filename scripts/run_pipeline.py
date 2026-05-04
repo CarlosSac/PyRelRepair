@@ -1,44 +1,57 @@
-"""Run the full repair pipeline (BaseRepair -> SigRepair) on ConDefects bugs.
+"""Run the full repair pipeline (BaseRepair → SigRepair) on BugsInPy bugs.
 
 Usage:
-    python scripts/run_pipeline.py [--n 10] [--data data/condefects]
+    python scripts/run_pipeline.py [--n 6] [--data data/bugsinpy_checked]
+
+Results saved to results/pipeline_<timestamp>/
+  <bug_id>.json   — per-bug patch candidates + validation output
+  summary.json    — aggregate stats
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))  # repo root
-sys.path.insert(0, str(Path(__file__).parent))          # scripts/
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pyrelrepair.base_repair import PatchCandidate
+from pyrelrepair.bugsinpy_loader import load_bugs
 from pyrelrepair.config import Config
-from pyrelrepair.condefects_loader import load_bugs
 from pyrelrepair.llm import OllamaClient
-from pyrelrepair.pipeline import PipelineResult, run_pipeline
-from condefects_utils import (
-    condefects_to_buginfo,
-    get_test_dir,
-    make_validator,
-    patch_script,
-    run_on_tests,
-    set_verbose,
-)
+from pyrelrepair.pipeline import run_pipeline
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def _candidate_to_dict(c: PatchCandidate) -> dict:
+    v = c.validation
+    return {
+        "stage": c.stage,
+        "patch_code": c.patch_code,
+        "passed": v.passed if v else None,
+        "tests_passed": v.num_passed if v else None,
+        "tests_failed": v.num_failed if v else None,
+        "num_errors": v.num_errors if v else None,
+        "return_code": v.return_code if v else None,
+        "validation_output": v.output if v else None,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run full pipeline on ConDefects")
-    parser.add_argument("--n", type=int, default=10)
-    parser.add_argument("--data", type=Path, default=Path("data/condefects"))
+    parser = argparse.ArgumentParser(description="Run full pipeline on BugsInPy")
+    parser.add_argument("--n", type=int, default=6, help="Number of bugs to evaluate")
+    parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     if args.verbose:
-        set_verbose()
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     config = Config()
     client = OllamaClient(config)
@@ -46,7 +59,6 @@ def main() -> None:
     if not client.is_available():
         logger.error("Ollama is not running or model '%s' not found.", config.ollama_model)
         sys.exit(1)
-
     if not client.is_model_available(config.embed_model):
         logger.error(
             "Embedding model '%s' not found. Run: ollama pull %s",
@@ -54,92 +66,89 @@ def main() -> None:
         )
         sys.exit(1)
 
-    has_tests = (args.data / "Test").is_dir()
-    if not has_tests:
-        logger.warning("Test/ directory not found — reporting candidate counts only.")
+    bugs = load_bugs(args.data, max_bugs=args.n)
+    if not bugs:
+        logger.error("No bugs found in %s — run bugsinpy_setup.py first.", args.data)
+        sys.exit(1)
 
-    logger.info("Loading bugs from %s ...", args.data)
-    raw_bugs = load_bugs(args.data, max_bugs=args.n * 3)
+    out_dir = Path("results") / f"pipeline_{datetime.now():%Y%m%d_%H%M%S}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Saving results to %s/", out_dir)
+    logger.info("Loaded %d bugs. Model: %s", len(bugs), config.ollama_model)
 
     results = []
+    for i, bug in enumerate(bugs, 1):
+        logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
+        pr = run_pipeline(bug, config)
 
-    for raw_bug in raw_bugs:
-        if len(results) >= args.n:
-            break
+        repaired = any(c.is_valid for c in pr.all_candidates)
+        best = pr.best_candidate
+        val = best.validation if best else None
 
-        bug = condefects_to_buginfo(raw_bug)
-        if bug is None:
-            continue
-
-        logger.info(
-            "[%d/%d] %s — function: %s", len(results) + 1, args.n, bug.bug_id, bug.function_name
+        bug_result = {
+            "bug_id": bug.bug_id,
+            "function_name": bug.function_name,
+            "file_path": str(bug.file_path),
+            "fault_line": bug.fault_line,
+            "repaired": repaired,
+            "passing_stage": pr.passing_stage,
+            "prompt_tokens": pr.total_prompt_tokens,
+            "completion_tokens": pr.total_completion_tokens,
+            "base_candidates": [_candidate_to_dict(c) for c in pr.base_candidates],
+            "sig_candidates": [_candidate_to_dict(c) for c in pr.sig_candidates],
+        }
+        (out_dir / f"{bug.bug_id}.json").write_text(
+            json.dumps(bug_result, indent=2), encoding="utf-8"
         )
-
-        test_in = get_test_dir(raw_bug, args.data) if has_tests else None
-        validator = make_validator(raw_bug, bug, test_in) if test_in else None
-        pipeline_result: PipelineResult = run_pipeline(bug, config, validator=validator)
 
         row = {
             "bug_id": bug.bug_id,
-            "base_candidates": len(pipeline_result.base_candidates),
-            "sig_candidates": len(pipeline_result.sig_candidates),
-            "prompt_tokens": pipeline_result.total_prompt_tokens,
-            "completion_tokens": pipeline_result.total_completion_tokens,
-            "tests_passed": None,
-            "tests_total": None,
-            "all_tests_passed": False,
-            "best_stage": None,
+            "base_candidates": len(pr.base_candidates),
+            "sig_candidates": len(pr.sig_candidates),
+            "passing_stage": pr.passing_stage,
+            "tests_passed": val.num_passed if val else None,
+            "tests_failed": val.num_failed if val else None,
+            "repaired": repaired,
+            "prompt_tokens": pr.total_prompt_tokens,
+            "completion_tokens": pr.total_completion_tokens,
         }
-
-        best = pipeline_result.best_candidate
-        if best and test_in:
-            if best.validation is not None:
-                passed = best.validation.num_passed
-                total = best.validation.num_passed + best.validation.num_failed
-            else:
-                original = raw_bug.buggy_file.read_text(encoding="utf-8")
-                patched = patch_script(original, best.patch_code, bug.start_line, bug.end_line)
-                passed, total = run_on_tests(patched, test_in)
-            row["tests_passed"] = passed
-            row["tests_total"] = total
-            row["all_tests_passed"] = passed == total and total > 0
-            row["best_stage"] = best.stage
-            logger.info(
-                "  base=%d  sig=%d  tests=%d/%d  stage=%s",
-                row["base_candidates"], row["sig_candidates"], passed, total, best.stage,
-            )
-        else:
-            logger.info("  base=%d  sig=%d", row["base_candidates"], row["sig_candidates"])
-
         results.append(row)
+        logger.info(
+            "  base=%d  sig=%d  repaired=%s  stage=%s",
+            row["base_candidates"], row["sig_candidates"], repaired, pr.passing_stage,
+        )
 
     total = len(results)
-    n_base = sum(1 for r in results if r["base_candidates"] > 0)
-    n_sig = sum(1 for r in results if r["sig_candidates"] > 0)
+    n_repaired = sum(r["repaired"] for r in results)
     total_prompt = sum(r["prompt_tokens"] for r in results)
     total_completion = sum(r["completion_tokens"] for r in results)
+    by_stage: dict[str, int] = {}
+    for r in results:
+        if r["passing_stage"]:
+            by_stage[r["passing_stage"]] = by_stage.get(r["passing_stage"], 0) + 1
 
-    print("\n=== Pipeline Results ===")
-    print(f"Model             : {config.ollama_model}")
-    print(f"Bugs evaluated    : {total}")
-    print(f"BaseRepair patches: {n_base}/{total}")
-    print(f"SigRepair patches : {n_sig}/{total}")
-    print(f"Tokens (prompt)   : {total_prompt:,}")
-    print(f"Tokens (output)   : {total_completion:,}")
-    print(f"Tokens (total)    : {total_prompt + total_completion:,}")
+    summary = {
+        "model": config.ollama_model,
+        "bugs_evaluated": total,
+        "repaired": n_repaired,
+        "repair_rate": round(n_repaired / total, 4) if total else 0,
+        "by_stage": by_stage,
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "bugs": results,
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    if has_tests:
-        n_pass = sum(r["all_tests_passed"] for r in results)
-        n_with_tests = sum(1 for r in results if r["tests_total"] is not None)
-        by_stage: dict[str, int] = {}
-        for r in results:
-            if r["all_tests_passed"] and r["best_stage"]:
-                by_stage[r["best_stage"]] = by_stage.get(r["best_stage"], 0) + 1
-        print(f"Bugs with tests   : {n_with_tests}/{total}")
-        if n_with_tests:
-            print(f"All tests pass    : {n_pass}/{n_with_tests} ({100*n_pass/n_with_tests:.1f}%)")
-        for stage, count in sorted(by_stage.items()):
-            print(f"  solved by {stage}: {count}")
+    print("\n=== Pipeline Results (BugsInPy) ===")
+    print(f"Model          : {config.ollama_model}")
+    print(f"Bugs evaluated : {total}")
+    print(f"Repaired       : {n_repaired}/{total} ({100*n_repaired/total:.1f}%)" if total else "Repaired: 0")
+    for stage, count in sorted(by_stage.items()):
+        print(f"  solved by {stage}: {count}")
+    print(f"Tokens (prompt): {total_prompt:,}")
+    print(f"Tokens (output): {total_completion:,}")
+    print(f"Tokens (total) : {total_prompt + total_completion:,}")
+    print(f"Results saved  : {out_dir}/")
 
 
 if __name__ == "__main__":

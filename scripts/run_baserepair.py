@@ -1,148 +1,56 @@
-"""Run BaseRepair on a sample of ConDefects Python bugs.
+"""Run BaseRepair baseline on BugsInPy bugs.
 
 Usage:
-    python scripts/run_baserepair.py [--n 10] [--data data/condefects]
+    python scripts/run_baserepair.py [--n 6] [--data data/bugsinpy_checked]
 
-Validation modes (auto-detected):
-  - tests_passed : patch passes all stdin/stdout test cases (requires Test/ dir)
-  - syntax_valid : patched code compiles without SyntaxError (fallback)
+Results saved to results/baserepair_<timestamp>/
+  <bug_id>.json   — per-bug patch candidates + validation output
+  summary.json    — aggregate stats
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-import re
-import subprocess
 import sys
-import tempfile
+from datetime import datetime
 from pathlib import Path
 
-# Allow running from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pyrelrepair.base_repair import PatchCandidate, base_repair
+from pyrelrepair.bugsinpy_loader import load_bugs
 from pyrelrepair.config import Config
-from pyrelrepair.condefects_loader import ConDefectsBug, load_bugs
 from pyrelrepair.llm import OllamaClient
-from pyrelrepair.prompt_utils import code_with_linenos, fault_context
-from pyrelrepair.prompts import SCRIPT_REPAIR_PROMPT
-from pyrelrepair.validator import validate_syntax
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _set_verbose() -> None:
-    logging.getLogger().setLevel(logging.DEBUG)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)  # silence HTTP noise
+def _candidate_to_dict(c: PatchCandidate) -> dict:
+    v = c.validation
+    return {
+        "stage": c.stage,
+        "patch_code": c.patch_code,
+        "passed": v.passed if v else None,
+        "tests_passed": v.num_passed if v else None,
+        "tests_failed": v.num_failed if v else None,
+        "num_errors": v.num_errors if v else None,
+        "return_code": v.return_code if v else None,
+        "validation_output": v.output if v else None,
+    }
 
 
-
-def extract_script(response: str) -> str | None:
-    """Extract a Python script from an LLM response (```python ... ```)."""
-    match = re.search(r"```python\s*\n(.*?)```", response, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    stripped = response.strip()
-    return stripped if stripped else None
-
-
-def get_test_dir(bug: ConDefectsBug, condefects_dir: Path) -> Path | None:
-    """Resolve the Test/in directory for a bug's task.
-
-    ConDefects test layout: Test/{contest}/{LETTER}/in/
-    """
-    test_root = condefects_dir / "Test"
-    if not test_root.is_dir():
-        return None
-
-    
-    parts = bug.task_id.split("_")  
-    if len(parts) != 2:
-        return None
-
-    # "abc221"
-    contest = parts[0]              
-    # "F" 
-    letter = parts[1].upper()       
-
-    test_in = test_root / contest / letter / "in"
-    if test_in.is_dir():
-        return test_in
-
-    # Some tasks use "Ex" instead of the letter
-    ex_in = test_root / contest / "Ex" / "in"
-    if ex_in.is_dir():
-        return ex_in
-
-    return None
-
-
-def run_on_tests(code: str, test_in_dir: Path, timeout: int = 10) -> tuple[int, int]:
-    """Run patched code against all input files, compare to expected output.
-
-    Returns (passed, total).
-    """
-    out_dir = test_in_dir.parent / "out"
-    passed = 0
-    total = 0
-
-    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", encoding="utf-8", delete=False) as tmp:
-        tmp.write(code)
-        tmp_path = Path(tmp.name)
-
-    try:
-        for in_file in sorted(test_in_dir.iterdir()):
-            expected_file = out_dir / in_file.name
-            if not expected_file.exists():
-                continue
-            total += 1
-            try:
-                result = subprocess.run(
-                    [sys.executable, str(tmp_path)],
-                    input=in_file.read_text(encoding="utf-8", errors="ignore"),
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-                actual = result.stdout.rstrip("\n")
-                expected = expected_file.read_text(
-                    encoding="utf-8", errors="ignore"
-                ).rstrip("\n")
-                if actual == expected:
-                    passed += 1
-                    logger.debug("    [PASS] %s", in_file.name)
-                else:
-                    logger.debug("    [FAIL] %s", in_file.name)
-                    logger.debug("      expected: %s", expected[:120])
-                    logger.debug("      actual  : %s", actual[:120])
-            except subprocess.TimeoutExpired:
-                logger.debug("    [TIMEOUT] %s", in_file.name)
-            except Exception as exc:
-                logger.debug("    [ERROR] %s — %s", in_file.name, exc)
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-    return passed, total
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Run BaseRepair on ConDefects")
-    parser.add_argument("--n", type=int, default=10, help="Number of bugs to evaluate")
-    parser.add_argument(
-        "--data",
-        type=Path,
-        default=Path("data/condefects"),
-        help="Path to ConDefects repo root",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show prompts, raw LLM responses, token counts, and per-test results",
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run BaseRepair on BugsInPy")
+    parser.add_argument("--n", type=int, default=6, help="Number of bugs to evaluate")
+    parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     if args.verbose:
-        _set_verbose()
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     config = Config()
     client = OllamaClient(config)
@@ -151,101 +59,80 @@ def main():
         logger.error("Ollama is not running or model '%s' not found.", config.ollama_model)
         sys.exit(1)
 
-    has_tests = (args.data / "Test").is_dir()
-    if has_tests:
-        logger.info("Test/ directory found — using stdin/stdout validation.")
-    else:
-        logger.warning("Test/ directory not found — syntax validation only.")
-
-    logger.info("Loading bugs from %s ...", args.data)
     bugs = load_bugs(args.data, max_bugs=args.n)
+    if not bugs:
+        logger.error("No bugs found in %s — run bugsinpy_setup.py first.", args.data)
+        sys.exit(1)
+
+    out_dir = Path("results") / f"baserepair_{datetime.now():%Y%m%d_%H%M%S}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Saving results to %s/", out_dir)
     logger.info("Loaded %d bugs. Model: %s", len(bugs), config.ollama_model)
 
     results = []
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-
     for i, bug in enumerate(bugs, 1):
+        logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
+        candidates, token_stats = base_repair(bug, config)
+
+        repaired = any(c.is_valid for c in candidates)
+        best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
+        val = best.validation if best else None
+
+        bug_result = {
+            "bug_id": bug.bug_id,
+            "function_name": bug.function_name,
+            "file_path": str(bug.file_path),
+            "fault_line": bug.fault_line,
+            "repaired": repaired,
+            "prompt_tokens": token_stats["prompt_tokens"],
+            "completion_tokens": token_stats["completion_tokens"],
+            "candidates": [_candidate_to_dict(c) for c in candidates],
+        }
+        (out_dir / f"{bug.bug_id}.json").write_text(
+            json.dumps(bug_result, indent=2), encoding="utf-8"
+        )
+
+        row = {
+            "bug_id": bug.bug_id,
+            "num_candidates": len(candidates),
+            "repaired": repaired,
+            "tests_passed": val.num_passed if val else None,
+            "tests_failed": val.num_failed if val else None,
+            "prompt_tokens": token_stats["prompt_tokens"],
+            "completion_tokens": token_stats["completion_tokens"],
+        }
+        results.append(row)
         logger.info(
-            "[%d/%d] %s / %s (fault line %d)",
-            i, len(bugs), bug.task_id, bug.submission_id, bug.fault_line,
+            "  candidates=%d  repaired=%s  tests=%s/%s",
+            len(candidates), repaired,
+            val.num_passed if val else "-",
+            (val.num_passed + val.num_failed) if val else "-",
         )
 
-        fault_line_content, fault_ctx = fault_context(bug.buggy_code, bug.fault_line)
-        prompt = SCRIPT_REPAIR_PROMPT.format(
-            task_id=bug.task_id,
-            fault_line=bug.fault_line,
-            buggy_code_with_linenos=code_with_linenos(bug.buggy_code),
-            fault_line_content=fault_line_content,
-            fault_context=fault_ctx,
-        )
-
-        logger.debug("--- PROMPT ---\n%s\n--------------", prompt)
-
-        responses = client.generate(prompt, num_return=1)
-        response_text = responses[0].text if responses else ""
-
-        if responses:
-            r = responses[0]
-            total_prompt_tokens += r.prompt_tokens
-            total_completion_tokens += r.completion_tokens
-            logger.debug("--- RAW RESPONSE (tokens: prompt=%d completion=%d) ---\n%s\n---",
-                         r.prompt_tokens, r.completion_tokens, response_text)
-
-        patched = extract_script(response_text)
-        logger.debug("--- EXTRACTED PATCH ---\n%s\n---", patched if patched else "(none)")
-
-        syntax_ok = validate_syntax(patched) if patched else False
-
-        tests_passed = None
-        tests_total = None
-
-        if has_tests and syntax_ok and patched:
-            test_in = get_test_dir(bug, args.data)
-            if test_in:
-                tests_passed, tests_total = run_on_tests(patched, test_in)
-                logger.info(
-                    "  syntax_valid=%s  tests=%s/%s", syntax_ok, tests_passed, tests_total
-                )
-            else:
-                logger.info("  syntax_valid=%s  tests=no test dir found", syntax_ok)
-        else:
-            logger.info("  syntax_valid=%s", syntax_ok)
-
-        results.append({
-            "task_id": bug.task_id,
-            "submission_id": bug.submission_id,
-            "syntax_valid": syntax_ok,
-            "tests_passed": tests_passed,
-            "tests_total": tests_total,
-            "all_tests_passed": (
-                tests_passed == tests_total and tests_total is not None and tests_total > 0
-            ),
-        })
-
-    # Summary
     total = len(results)
-    n_syntax = sum(r["syntax_valid"] for r in results)
+    n_repaired = sum(r["repaired"] for r in results)
+    total_prompt = sum(r["prompt_tokens"] for r in results)
+    total_completion = sum(r["completion_tokens"] for r in results)
 
-    print("\n=== BaseRepair Results ===")
+    summary = {
+        "model": config.ollama_model,
+        "bugs_evaluated": total,
+        "repaired": n_repaired,
+        "repair_rate": round(n_repaired / total, 4) if total else 0,
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "bugs": results,
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    print("\n=== BaseRepair Results (BugsInPy) ===")
     print(f"Model          : {config.ollama_model}")
     print(f"Bugs evaluated : {total}")
-    print(f"Syntax valid   : {n_syntax}/{total} ({100*n_syntax/total:.1f}%)")
-    print(f"Tokens (prompt): {total_prompt_tokens:,}")
-    print(f"Tokens (output): {total_completion_tokens:,}")
-    print(f"Tokens (total) : {total_prompt_tokens + total_completion_tokens:,}")
-
-    if has_tests:
-        n_all_pass = sum(r["all_tests_passed"] for r in results)
-        n_with_tests = sum(1 for r in results if r["tests_total"] is not None)
-        print(f"Bugs with tests: {n_with_tests}/{total}")
-        if n_with_tests:
-            print(
-                f"All tests pass : {n_all_pass}/{n_with_tests} "
-                f"({100*n_all_pass/n_with_tests:.1f}%)"
-            )
-    else:
-        print("(Download Test.zip from the ConDefects OneDrive link for full validation)")
+    print(f"Repaired       : {n_repaired}/{total} ({100*n_repaired/total:.1f}%)" if total else "Repaired: 0")
+    print(f"Tokens (prompt): {total_prompt:,}")
+    print(f"Tokens (output): {total_completion:,}")
+    print(f"Tokens (total) : {total_prompt + total_completion:,}")
+    print(f"Results saved  : {out_dir}/")
 
 
 if __name__ == "__main__":
