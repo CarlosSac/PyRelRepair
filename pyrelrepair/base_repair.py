@@ -142,9 +142,10 @@ def base_repair(
 
         candidate = PatchCandidate(patch_code=patched_func, stage="BaseRepair")
 
-        if bug.project_dir and bug.file_path.exists():
+        if bug.project_dir and (bug.project_dir / bug.file_path).exists():
+            abs_file = bug.project_dir / bug.file_path
             patched_source = apply_patch(
-                original_file=bug.file_path,
+                original_file=abs_file,
                 buggy_function_name=bug.function_name,
                 patched_function=patched_func,
                 start_line=bug.start_line,
@@ -152,7 +153,7 @@ def base_repair(
             )
             result = validate_patch(
                 project_dir=bug.project_dir,
-                original_file=bug.file_path,
+                original_file=abs_file,
                 patched_source=patched_source,
                 test_file=bug.test_file,
                 config=config,
