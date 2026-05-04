@@ -118,13 +118,18 @@ def base_repair(
         config.base_num_patches,
         bug.bug_id,
     )
+    logger.debug("BaseRepair prompt:\n%s\n%s", "-" * 60, prompt)
 
     responses = llm.generate(prompt, num_return=config.base_num_patches)
 
     for i, response in enumerate(responses):
         token_stats["prompt_tokens"] += response.prompt_tokens
         token_stats["completion_tokens"] += response.completion_tokens
-        logger.debug("BaseRepair response %d: %s", i, response.text[:200])
+        logger.debug(
+            "BaseRepair response %d (prompt=%d tok, completion=%d tok):\n%s\n%s",
+            i, response.prompt_tokens, response.completion_tokens,
+            "-" * 60, response.text,
+        )
 
         patched_func = extract_function_from_response(response.text)
         if patched_func is None:

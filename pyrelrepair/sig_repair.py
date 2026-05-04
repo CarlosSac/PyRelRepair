@@ -96,8 +96,13 @@ def _query_rewrite(llm: OllamaClient, bug: BugInfo) -> tuple[str, int, int]:
         fault_line=fault_line_relative,
     )
 
+    logger.debug("SigRepair query-rewrite prompt:\n%s\n%s", "-" * 60, prompt)
     response = llm.generate(prompt, temperature=0.7, num_return=1)[0]
     text = response.text.strip()
+    logger.debug(
+        "SigRepair query-rewrite response (prompt=%d tok, completion=%d tok):\n%s\n%s",
+        response.prompt_tokens, response.completion_tokens, "-" * 60, text,
+    )
 
     root_causes = []
     functions = []
@@ -116,7 +121,7 @@ def _query_rewrite(llm: OllamaClient, bug: BugInfo) -> tuple[str, int, int]:
     if not query.strip():
         query = f"{bug.function_name} {bug.error_message[:200]}"
 
-    logger.debug("SigRepair query rewrite: %s", query[:200])
+    logger.debug("SigRepair query rewrite result: %s", query)
     return query, response.prompt_tokens, response.completion_tokens
 
 
@@ -189,10 +194,16 @@ def sig_repair(
             signatures=sig_block,
         )
 
+        logger.debug("SigRepair iter %d prompt:\n%s\n%s", i + 1, "-" * 60, prompt)
         responses = llm.generate(prompt, num_return=config.sig_num_patches_per_iter)
         for response in responses:
             token_stats["prompt_tokens"] += response.prompt_tokens
             token_stats["completion_tokens"] += response.completion_tokens
+            logger.debug(
+                "SigRepair iter %d response (prompt=%d tok, completion=%d tok):\n%s\n%s",
+                i + 1, response.prompt_tokens, response.completion_tokens,
+                "-" * 60, response.text,
+            )
 
             patched_func = extract_function_from_response(response.text)
             if patched_func is None:
