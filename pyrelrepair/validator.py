@@ -106,7 +106,7 @@ def validate_patch(
         # Build pytest command
         cmd = [sys.executable, "-m", "pytest", "-x", "--tb=short", "-q"]
         if test_file:
-            cmd.append(str(test_file))
+            cmd.append(str(test_file.resolve()))
 
         result = subprocess.run(
             cmd,

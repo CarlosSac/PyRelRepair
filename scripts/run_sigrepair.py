@@ -1,9 +1,9 @@
-"""Run BaseRepair baseline on BugsInPy bugs.
+"""Run SigRepair on BugsInPy bugs.
 
 Usage:
-    python scripts/run_baserepair.py [--n 6] [--model qwen2.5-coder:3b deepseek-r1:7b ...]
+    python scripts/run_sigrepair.py [--n 6] [--model qwen2.5-coder:3b deepseek-r1:7b ...]
 
-Results saved to results/baserepair_<model>_<timestamp>/
+Results saved to results/sigrepair_<model>_<timestamp>/
   <bug_id>.json   — per-bug patch candidates + validation output
   summary.json    — aggregate stats
 """
@@ -19,10 +19,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pyrelrepair.base_repair import BugInfo, PatchCandidate, base_repair
+from pyrelrepair.base_repair import BugInfo, PatchCandidate
 from pyrelrepair.bugsinpy_loader import load_bugs
 from pyrelrepair.config import Config
 from pyrelrepair.llm import OllamaClient
+from pyrelrepair.sig_repair import sig_repair
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _candidate_to_dict(c: PatchCandidate) -> dict:
 def _run_for_model(model: str, bugs: list[BugInfo], config: Config, debug: bool = False) -> dict:
     cfg = dataclasses.replace(config, ollama_model=model)
     model_slug = model.replace(":", "-").replace("/", "-")
-    out_dir = Path("results") / f"baserepair_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}"
+    out_dir = Path("results") / f"sigrepair_{model_slug}_{datetime.now():%Y%m%d_%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     debug_handler = None
@@ -67,7 +68,7 @@ def _run_for_model(model: str, bugs: list[BugInfo], config: Config, debug: bool 
     try:
         for i, bug in enumerate(bugs, 1):
             logger.info("[%d/%d] %s — %s()", i, len(bugs), bug.bug_id, bug.function_name)
-            candidates, token_stats = base_repair(bug, cfg)
+            candidates, token_stats = sig_repair(bug, cfg)
 
             repaired = any(c.is_valid for c in candidates)
             best = next((c for c in candidates if c.is_valid), candidates[-1] if candidates else None)
@@ -124,7 +125,7 @@ def _run_for_model(model: str, bugs: list[BugInfo], config: Config, debug: bool 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run BaseRepair on BugsInPy")
+    parser = argparse.ArgumentParser(description="Run SigRepair on BugsInPy")
     parser.add_argument("--n", type=int, default=6, help="Number of bugs to evaluate")
     parser.add_argument("--data", type=Path, default=Path("data/bugsinpy_checked"))
     parser.add_argument("--model", nargs="+", default=None, help="One or more Ollama models to compare")
@@ -139,9 +140,13 @@ def main() -> None:
     config = Config()
     models = args.model or [config.ollama_model]
 
-    for model in models:
-        cfg = dataclasses.replace(config, ollama_model=model)
-        if not OllamaClient(cfg).is_available():
+    if not OllamaClient(config).is_model_available(config.embed_model):
+        logger.error("Embedding model '%s' not found. Run: ollama pull %s",
+                     config.embed_model, config.embed_model)
+        sys.exit(1)
+
+    for model in list(models):
+        if not OllamaClient(dataclasses.replace(config, ollama_model=model)).is_available():
             logger.error("Model '%s' not found in Ollama — skipping.", model)
             models = [m for m in models if m != model]
 
@@ -160,7 +165,7 @@ def main() -> None:
     if len(summaries) == 1:
         s = summaries[0]
         total = s["bugs_evaluated"]
-        print("\n=== BaseRepair Results (BugsInPy) ===")
+        print("\n=== SigRepair Results (BugsInPy) ===")
         print(f"Model          : {s['model']}")
         print(f"Bugs evaluated : {total}")
         print(f"Repaired       : {s['repaired']}/{total} ({100*s['repair_rate']:.1f}%)")
@@ -168,7 +173,7 @@ def main() -> None:
         print(f"Tokens (output): {s['total_completion_tokens']:,}")
         print(f"Results saved  : {s['out_dir']}/")
     else:
-        print("\n=== BaseRepair Comparison (BugsInPy) ===")
+        print("\n=== SigRepair Comparison (BugsInPy) ===")
         col = 26
         print(f"{'Model':<{col}}  {'Repaired':<12}  {'Prompt tok':>12}  {'Output tok':>12}  Results")
         print("-" * 90)

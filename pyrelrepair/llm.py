@@ -112,14 +112,17 @@ class OllamaClient:
             logger.error("Ollama chat request failed: %s", e)
             return LLMResponse(text="", model=self.model)
 
-    def is_available(self) -> bool:
-        """Check if the Ollama server is reachable and the model is loaded."""
+    def is_model_available(self, model: str) -> bool:
+        """Check if a specific model is available in the Ollama instance."""
         try:
             resp = requests.get(f"{self.base_url}/api/tags", timeout=5)
             resp.raise_for_status()
             models = [m["name"] for m in resp.json().get("models", [])]
-            # Match with or without tag suffix
-            model_base = self.model.split(":")[0]
+            model_base = model.split(":")[0]
             return any(model_base in m for m in models)
         except requests.RequestException:
             return False
+
+    def is_available(self) -> bool:
+        """Check if the Ollama server is reachable and the configured LLM model is loaded."""
+        return self.is_model_available(self.model)
