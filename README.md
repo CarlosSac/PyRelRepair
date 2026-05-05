@@ -124,6 +124,37 @@ Results are saved to `results/<stage>_<model>_<timestamp>/`:
 - `summary.json`: aggregate repair rate and token totals
 - `debug.log`: full prompt/response log (with `--debug`)
 
+For ConDefects, all models share a single run directory:
+`results/condefects_<stage>_<timestamp>/<model>/`
+
+### Output Examples
+
+Single model (BugsInPy):
+
+```
+=== BaseRepair Results (BugsInPy) ===
+Model          : qwen3-coder:30b
+Bugs evaluated : 6
+Repaired       : 2/6 (33.3%)
+Tokens (prompt): 7,313
+Tokens (output): 19,126
+Results saved  : results/baserepair_qwen3-coder-30b_20260504_180632/
+```
+
+Multi-model comparison (ConDefects):
+
+```
+=== BaseRepair Comparison (ConDefects) ===
+Model                       Base patches    Tests pass      Prompt tok    Output tok
+------------------------------------------------------------------------------------------
+gemma2:9b                   4/5             1/4                  3,970         1,857
+qwen2.5:7b                  5/5             2/5                  3,730         1,617
+codellama:13b               4/5             0/4                  4,244         1,447
+deepseek-coder-v2:16b       5/5             2/5                  4,074         1,947
+
+Results saved: results/condefects_baserepair_20260504_163500/
+```
+
 ## Configuration
 
 Key settings in `pyrelrepair/config.py`:
