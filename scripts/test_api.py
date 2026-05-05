@@ -70,7 +70,7 @@ def run_case(case: dict, config: Config) -> bool:
     print(f"Case: {case['name']}")
     print(f"Expected fix contains: {case['expected_fix']!r}")
 
-    candidates = base_repair(case["bug"], config)
+    candidates, _ = base_repair(case["bug"], config)
 
     if not candidates:
         print("FAIL  no candidates returned")
