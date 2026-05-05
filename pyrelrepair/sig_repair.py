@@ -144,6 +144,7 @@ def sig_repair(
     llm = OllamaClient(config)
     candidates: list[PatchCandidate] = []
     token_stats: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+    seen_patches: set[str] = set()
 
     candidate_functions = _build_candidate_dataset(bug)
     if not candidate_functions:
@@ -213,6 +214,11 @@ def sig_repair(
             if not validate_syntax(patched_func):
                 logger.warning("SigRepair iter %d: syntax error in patch", i + 1)
                 continue
+
+            if patched_func in seen_patches:
+                logger.debug("SigRepair iter %d: duplicate patch, skipping", i + 1)
+                continue
+            seen_patches.add(patched_func)
 
             candidate = PatchCandidate(patch_code=patched_func, stage="SigRepair")
 
